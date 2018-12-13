@@ -1,0 +1,11 @@
+[package]
+name = "odata-parser-rs"
+version = "0.1.0"
+authors = ["Petros Angelatos <petrosagg@gmail.com>"]
+
+[dependencies]
+http = "0.1"
+
+[dependencies.nom]
+version = "^4.1"
+features = ["verbose-errors"]
