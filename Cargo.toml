@@ -5,6 +5,7 @@ authors = ["Petros Angelatos <petrosagg@gmail.com>"]
 
 [dependencies]
 http = "0.1"
+nom-trace = "*"
 
 [dependencies.nom]
 version = "^4.1"
