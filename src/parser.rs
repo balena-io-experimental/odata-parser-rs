@@ -111,7 +111,8 @@ named!(serviceRoot<&str, &str>, recognize!(tuple!(alt_complete!(tag_no_case!("ht
 //*                  / '$entity' "/" qualifiedEntityTypeName "?" entityCastOptions
 //*                  / '$metadata' [ "?" metadataOptions ] [ context ]
 //*                  / resourcePath [ "?" queryOptions ]
-named!(pub odataRelativeUri<&str, ast::RelativeURI>, alt_complete!(value!(ast::RelativeURI::Batch, tuple!(tag!("$batch"), opt!(tuple!(tag!("?"), batchOptions))))
+named!(pub odataRelativeUri<&str, ast::RelativeURI>, alt_complete!(
+					  do_parse!(foo: preceded!(tag!("$batch"), opt!(preceded!(tag!("?"), batchOptions))) >> (ast::RelativeURI::Batch(foo)))
 					  | value!(ast::RelativeURI::Entity, tuple!(tag!("$entity"), tag!("?"), entityOptions))
 					  | value!(ast::RelativeURI::Entity, tuple!(tag!("$entity/"), qualifiedEntityTypeName, tag!("?"), entityCastOptions))
 					  | value!(ast::RelativeURI::Metadata, tuple!(tag!("$metadata"), opt!(tuple!(tag!("?"), metadataOptions)), opt!(context)))
@@ -359,10 +360,10 @@ named!(queryOptions<&str, &str>, recognize!(tuple!(queryOption, many0!(tuple!(ta
 named!(queryOption<&str, &str>, alt_complete!(systemQueryOption | aliasAndValue | nameAndValue | customQueryOption));
 //*
 //* batchOptions = batchOption *( "&" batchOption )
-named!(batchOptions<&str, &str>, recognize!(tuple!(batchOption, many0!(tuple!(tag!("&"), batchOption)))));
+named!(batchOptions<&str, Vec<ast::QueryOption>>, separated_nonempty_list_complete!(tag!("&"), batchOption));
 //* batchOption  = format
 //*              /customQueryOption
-named!(batchOption<&str, &str>, alt_complete!(format | customQueryOption));
+named!(batchOption<&str, ast::QueryOption>, alt_complete!(format_wip | customQueryOption_wip));
 //*
 //* metadataOptions = metadataOption *( "&" metadataOption )
 named!(metadataOptions<&str, &str>, recognize!(tuple!(metadataOption, many0!(tuple!(tag!("&"), metadataOption)))));
@@ -496,15 +497,19 @@ named!(index<&str, &str>, recognize!(tuple!(alt_complete!(tag_no_case!("$index")
 //*          / 1*pchar "/" 1*pchar ; <a data service specific value indicating a
 //*          )                     ; format specific to the specific data service> or
 //*                                ; <An IANA-defined [IANA-MMT] content type>
-named!(format<&str, &str>, recognize!(tuple!(
-					     alt_complete!(tag_no_case!("$format") | tag_no_case!("format")), EQ,
-					     alt_complete!(
-						   tag_no_case!("atom")
-						   | tag_no_case!("json")
-						   | tag_no_case!("xml")
-						   | tag_no_case!("xml")
-						   | recognize!(tuple!(many1!(pchar), tag!("/"), many1!(pchar)))
-					     ))));
+named!(format_wip<&str, ast::QueryOption>, preceded!(
+					     tuple!(opt!(tag!("$")), tag_no_case!("format"), EQ),
+					     do_parse!(
+						foo: alt_complete!(
+							     value!(ast::FormatKind::Atom, tag_no_case!("atom"))
+							   | value!(ast::FormatKind::JSON, tag_no_case!("json"))
+							   | value!(ast::FormatKind::XML, tag_no_case!("xml"))
+							   | do_parse!(foo: recognize!(tuple!(many1!(pchar), tag!("/"), many1!(pchar))) >> (ast::FormatKind::Custom(foo)))
+						) >>
+						(ast::QueryOption::Format(foo))
+					     )));
+named!(format<&str, &str>, recognize!(format_wip));
+
 //*
 //* inlinecount = ( "$count" / "count" ) EQ booleanValue
 named!(inlinecount<&str, &str>, recognize!(tuple!(alt_complete!(tag_no_case!("$count") | tag_no_case!("count")), EQ, booleanValue)));
@@ -607,7 +612,8 @@ named!(nameAndValue<&str, &str>, recognize!(tuple!(parameterName, EQ, parameterV
 named!(parameterValue<&str, &str>, alt_complete!(arrayOrObject | commonExpr));
 //*
 //* customQueryOption = customName [ EQ customValue ]
-named!(customQueryOption<&str, &str>, recognize!(tuple!(customName, opt!(tuple!(EQ, customValue)))));
+named!(customQueryOption_wip<&str, ast::QueryOption>, do_parse!(foo: recognize!(tuple!(customName, opt!(tuple!(EQ, customValue)))) >> (ast::QueryOption::Custom(foo))));
+named!(customQueryOption<&str, &str>, recognize!(customQueryOption_wip));
 //* customName        = qchar-no-AMP-EQ-AT-DOLLAR *( qchar-no-AMP-EQ )
 named!(customName<&str, &str>, recognize!(tuple!(qchar_no_AMP_EQ_AT_DOLLAR, many0!(qchar_no_AMP_EQ))));
 //* customValue       = *( qchar-no-AMP )

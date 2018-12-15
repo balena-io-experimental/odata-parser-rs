@@ -5,5 +5,6 @@ mod parser;
 mod ast;
 
 fn main() {
-	println!("{:?}", parser::odataRelativeUri("PrafdsdoductsByComplex(complex=@c)?@c={\"@odata.type\":\"Model.Customer\",\"Name\":\"Value\"}\n"));
+	// println!("{:?}", parser::odataRelativeUri("ProductsByComplex(complex=@c)?@c={\"@odata.type\":\"Model.Customer\",\"Name\":\"Value\"}\n"));
+	println!("{:?}", parser::odataRelativeUri("$batch?$format=application/json\n"));
 }
