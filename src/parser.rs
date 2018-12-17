@@ -95,15 +95,22 @@ use super::ast;
 //*
 //*
 //* odataUri = serviceRoot [ odataRelativeUri ]
-named!(odataUri<&str, &str>, recognize!(tuple!(serviceRoot, opt!(odataRelativeUri))));
+named!(pub odataUri<&str, ast::ODataURI>, do_parse!(
+		service_root: serviceRoot >>
+		relative_uri: opt!(odataRelativeUri) >>
+		(ast::ODataURI{service_root, relative_uri: relative_uri.unwrap_or(ast::RelativeURI::None)}
+		)));
 //*
 //* serviceRoot = ( "https" / "http" )                    ; Note: case-insensitive
 //*               "://" host [ ":" port ]
 //*               "/" *( segment-nz "/" )
-named!(serviceRoot<&str, &str>, recognize!(tuple!(alt_complete!(tag_no_case!("https") | tag_no_case!("http")),
-						  tag!("://"), host, opt!(tuple!(tag!(":"), port)),
-						  tag!("/"), many0!(tuple!(segment_nz, tag!("/")))
-						  )));
+named!(serviceRoot<&str, ast::ServiceRoot>, do_parse!(
+						data: recognize!(tuple!(alt_complete!(tag_no_case!("https") | tag_no_case!("http")),
+								 tag!("://"), host, opt!(tuple!(tag!(":"), port)),
+								 tag!("/"), many0!(tuple!(segment_nz, tag!("/")))
+						      )) >>
+						(ast::ServiceRoot{data})
+					    ));
 //*
 //* ; Note: dollar-prefixed path segments are case-sensitive!
 //* odataRelativeUri = '$batch'  [ "?" batchOptions ]
@@ -111,13 +118,16 @@ named!(serviceRoot<&str, &str>, recognize!(tuple!(alt_complete!(tag_no_case!("ht
 //*                  / '$entity' "/" qualifiedEntityTypeName "?" entityCastOptions
 //*                  / '$metadata' [ "?" metadataOptions ] [ context ]
 //*                  / resourcePath [ "?" queryOptions ]
-named!(pub odataRelativeUri<&str, ast::RelativeURI>, alt_complete!(
-					  do_parse!(foo: preceded!(tag!("$batch"), opt!(preceded!(tag!("?"), batchOptions))) >> (ast::RelativeURI::Batch(foo)))
+named!(odataRelativeUri<&str, ast::RelativeURI>, alt_complete!(
+					  map!(preceded!(tag!("$batch"), opt!(preceded!(tag!("?"), batchOptions))), ast::RelativeURI::Batch)
 					  | value!(ast::RelativeURI::Entity, tuple!(tag!("$entity"), tag!("?"), entityOptions))
 					  | value!(ast::RelativeURI::Entity, tuple!(tag!("$entity/"), qualifiedEntityTypeName, tag!("?"), entityCastOptions))
 					  | value!(ast::RelativeURI::Metadata, tuple!(tag!("$metadata"), opt!(tuple!(tag!("?"), metadataOptions)), opt!(context)))
-					  | value!(ast::RelativeURI::ResourcePath, tuple!(resourcePath, opt!(tuple!(tag!("?"), queryOptions))))
-					  ));
+					  | do_parse!(
+						  resource_path: resourcePath >>
+						  options: opt!(preceded!(tag!("?"), queryOptions)) >>
+						  (ast::RelativeURI::Resource(resource_path))
+					  )));
 //*
 //*
 //* ;------------------------------------------------------------------------------
@@ -136,18 +146,19 @@ named!(pub odataRelativeUri<&str, ast::RelativeURI>, alt_complete!(
 //*              / functionImportCallNoParens
 //*              / crossjoin
 //*              / '$all'                         [ "/" qualifiedEntityTypeName ]
-named!(resourcePath<&str, &str>, alt_complete!(recognize!(tuple!(entitySetName, opt!(collectionNavigation)))
-				      | recognize!(tuple!(singletonEntity,opt!(singleNavigation)))
-				      | actionImportCall
-				      | recognize!(tuple!(entityColFunctionImportCall, opt!(collectionNavigation)))
-				      | recognize!(tuple!(entityFunctionImportCall, opt!(singleNavigation)))
-				      | recognize!(tuple!(complexColFunctionImportCall, opt!(complexColPath)))
-				      | recognize!(tuple!(complexFunctionImportCall, opt!(complexPath)))
-				      | recognize!(tuple!(primitiveColFunctionImportCall, opt!(primitiveColPath)))
-				      | recognize!(tuple!(primitiveFunctionImportCall, opt!(primitivePath)))
-				      | functionImportCallNoParens
-				      | crossjoin
-				      | recognize!(tuple!(tag!("$all"), opt!(tuple!(tag!("/"), qualifiedEntityTypeName))))
+named!(resourcePath<&str, ast::ResourcePath>, alt_complete!(
+					map!(recognize!(tuple!(entitySetName, opt!(collectionNavigation))), ast::ResourcePath::Unimplemented)
+				      | map!(recognize!(tuple!(singletonEntity,opt!(singleNavigation))), ast::ResourcePath::Unimplemented)
+				      | map!(actionImportCall, ast::ResourcePath::Unimplemented)
+				      | map!(recognize!(tuple!(entityColFunctionImportCall, opt!(collectionNavigation))), ast::ResourcePath::Unimplemented)
+				      | map!(recognize!(tuple!(entityFunctionImportCall, opt!(singleNavigation))), ast::ResourcePath::Unimplemented)
+				      | map!(recognize!(tuple!(complexColFunctionImportCall, opt!(complexColPath))), ast::ResourcePath::Unimplemented)
+				      | map!(recognize!(tuple!(complexFunctionImportCall, opt!(complexPath))), ast::ResourcePath::Unimplemented)
+				      | map!(recognize!(tuple!(primitiveColFunctionImportCall, opt!(primitiveColPath))), ast::ResourcePath::Unimplemented)
+				      | map!(recognize!(tuple!(primitiveFunctionImportCall, opt!(primitivePath))), ast::ResourcePath::Unimplemented)
+				      | map!(functionImportCallNoParens, ast::ResourcePath::Unimplemented)
+				      | map!(crossjoin, ast::ResourcePath::Unimplemented)
+				      | map!(recognize!(tuple!(tag!("$all"), opt!(tuple!(tag!("/"), qualifiedEntityTypeName)))), ast::ResourcePath::Unimplemented)
 				      ));
 //*
 //* collectionNavigation = [ "/" qualifiedEntityTypeName ] [ collectionNavPath ]
@@ -499,14 +510,14 @@ named!(index<&str, &str>, recognize!(tuple!(alt_complete!(tag_no_case!("$index")
 //*                                ; <An IANA-defined [IANA-MMT] content type>
 named!(format_wip<&str, ast::QueryOption>, preceded!(
 					     tuple!(opt!(tag!("$")), tag_no_case!("format"), EQ),
-					     do_parse!(
-						foo: alt_complete!(
+					     map!(
+						alt_complete!(
 							     value!(ast::FormatKind::Atom, tag_no_case!("atom"))
 							   | value!(ast::FormatKind::JSON, tag_no_case!("json"))
 							   | value!(ast::FormatKind::XML, tag_no_case!("xml"))
-							   | do_parse!(foo: recognize!(tuple!(many1!(pchar), tag!("/"), many1!(pchar))) >> (ast::FormatKind::Custom(foo)))
-						) >>
-						(ast::QueryOption::Format(foo))
+							   | map!(recognize!(tuple!(many1!(pchar), tag!("/"), many1!(pchar))), ast::FormatKind::Custom)
+						),
+						ast::QueryOption::Format
 					     )));
 named!(format<&str, &str>, recognize!(format_wip));
 
