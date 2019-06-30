@@ -1,3 +1,5 @@
+use super::schema;
+
 #[derive(Debug)]
 pub struct ODataURI<'a> {
 	pub service_root: ServiceRoot<'a>,
@@ -21,7 +23,7 @@ pub enum RelativeURI<'a> {
 #[derive(Debug)]
 pub enum ResourcePath<'a> {
 	Unimplemented(&'a str),
-	EntitySet,
+	EntitySet(&'a schema::EntitySet),
 }
 
 impl<'a> From<&'a str> for ResourcePath<'a> {

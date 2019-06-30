@@ -2,6 +2,10 @@
 
 use std::str;
 use super::ast;
+use super::schema::Schema;
+use super::schema;
+
+use nom::{IResult,Err,Needed};
 
 //* ;------------------------------------------------------------------------------
 //* ; OData ABNF Construction Rules Version 4.01
@@ -95,11 +99,13 @@ use super::ast;
 //*
 //*
 //* odataUri = serviceRoot [ odataRelativeUri ]
-named!(pub odataUri<&str, ast::ODataURI>, do_parse!(
+pub fn odataUri<'a>(input: &'a str, schema: &'a Schema) -> IResult<&'a str, ast::ODataURI<'a>> {
+	do_parse!(input,
 		service_root: serviceRoot >>
-		relative_uri: opt!(odataRelativeUri) >>
-		(ast::ODataURI{service_root, relative_uri: relative_uri.unwrap_or(ast::RelativeURI::None)}
-		)));
+		relative_uri: opt!(call!(odataRelativeUri, schema)) >>
+		(ast::ODataURI{service_root, relative_uri: relative_uri.unwrap_or(ast::RelativeURI::None)})
+	)
+}
 //*
 //* serviceRoot = ( "https" / "http" )                    ; Note: case-insensitive
 //*               "://" host [ ":" port ]
@@ -111,6 +117,7 @@ named!(serviceRoot<&str, ast::ServiceRoot>, do_parse!(
 						      )) >>
 						(ast::ServiceRoot{data})
 					    ));
+
 //*
 //* ; Note: dollar-prefixed path segments are case-sensitive!
 //* odataRelativeUri = '$batch'  [ "?" batchOptions ]
@@ -118,16 +125,20 @@ named!(serviceRoot<&str, ast::ServiceRoot>, do_parse!(
 //*                  / '$entity' "/" qualifiedEntityTypeName "?" entityCastOptions
 //*                  / '$metadata' [ "?" metadataOptions ] [ context ]
 //*                  / resourcePath [ "?" queryOptions ]
-named!(odataRelativeUri<&str, ast::RelativeURI>, alt_complete!(
-					  map!(preceded!(tag!("$batch"), opt!(preceded!(tag!("?"), batchOptions))), ast::RelativeURI::Batch)
-					  | value!(ast::RelativeURI::Entity, tuple!(tag!("$entity"), tag!("?"), entityOptions))
-					  | value!(ast::RelativeURI::Entity, tuple!(tag!("$entity/"), qualifiedEntityTypeName, tag!("?"), entityCastOptions))
-					  | value!(ast::RelativeURI::Metadata, tuple!(tag!("$metadata"), opt!(tuple!(tag!("?"), metadataOptions)), opt!(context)))
-					  | do_parse!(
-						  resource_path: resourcePath >>
-						  options: opt!(preceded!(tag!("?"), queryOptions)) >>
-						  (ast::RelativeURI::Resource(resource_path))
-					  )));
+fn odataRelativeUri<'a>(input: &'a str, schema: &'a Schema)-> IResult<&'a str, ast::RelativeURI<'a>> {
+	alt_complete!(input,
+		map!(preceded!(tag!("$batch"), opt!(preceded!(tag!("?"), batchOptions))), ast::RelativeURI::Batch)
+		| value!(ast::RelativeURI::Entity, tuple!(tag!("$entity"), tag!("?"), entityOptions))
+		| value!(ast::RelativeURI::Entity, tuple!(tag!("$entity/"), qualifiedEntityTypeName, tag!("?"), entityCastOptions))
+		| value!(ast::RelativeURI::Metadata, tuple!(tag!("$metadata"), opt!(tuple!(tag!("?"), metadataOptions)), opt!(context)))
+		| do_parse!(
+			resource_path: call!(resourcePath, schema.get_entity_container()) >>
+			options: opt!(preceded!(tag!("?"), queryOptions)) >>
+			(ast::RelativeURI::Resource(resource_path))
+		)
+	)
+}
+
 //*
 //*
 //* ;------------------------------------------------------------------------------
@@ -146,20 +157,27 @@ named!(odataRelativeUri<&str, ast::RelativeURI>, alt_complete!(
 //*              / functionImportCallNoParens
 //*              / crossjoin
 //*              / '$all'                         [ "/" qualifiedEntityTypeName ]
-named!(resourcePath<&str, ast::ResourcePath>, alt_complete!(
-					map!(recognize!(tuple!(entitySetName, opt!(collectionNavigation))), ast::ResourcePath::Unimplemented)
-				      | map!(recognize!(tuple!(singletonEntity,opt!(singleNavigation))), ast::ResourcePath::Unimplemented)
-				      | map!(actionImportCall, ast::ResourcePath::Unimplemented)
-				      | map!(recognize!(tuple!(entityColFunctionImportCall, opt!(collectionNavigation))), ast::ResourcePath::Unimplemented)
-				      | map!(recognize!(tuple!(entityFunctionImportCall, opt!(singleNavigation))), ast::ResourcePath::Unimplemented)
-				      | map!(recognize!(tuple!(complexColFunctionImportCall, opt!(complexColPath))), ast::ResourcePath::Unimplemented)
-				      | map!(recognize!(tuple!(complexFunctionImportCall, opt!(complexPath))), ast::ResourcePath::Unimplemented)
-				      | map!(recognize!(tuple!(primitiveColFunctionImportCall, opt!(primitiveColPath))), ast::ResourcePath::Unimplemented)
-				      | map!(recognize!(tuple!(primitiveFunctionImportCall, opt!(primitivePath))), ast::ResourcePath::Unimplemented)
-				      | map!(functionImportCallNoParens, ast::ResourcePath::Unimplemented)
-				      | map!(crossjoin, ast::ResourcePath::Unimplemented)
-				      | map!(recognize!(tuple!(tag!("$all"), opt!(tuple!(tag!("/"), qualifiedEntityTypeName)))), ast::ResourcePath::Unimplemented)
-				      ));
+fn resourcePath<'a>(input: &'a str, entity_container: &'a schema::EntityContainer) -> IResult<&'a str, ast::ResourcePath<'a>> {
+	alt_complete!(input,
+		do_parse!(
+			entity_set: call!(entitySetName_wip, entity_container) >>
+			options: opt!(collectionNavigation) >>
+			(ast::ResourcePath::EntitySet(entity_set))
+		)
+		| map!(recognize!(tuple!(singletonEntity,opt!(singleNavigation))), ast::ResourcePath::Unimplemented)
+		| map!(actionImportCall, ast::ResourcePath::Unimplemented)
+		| map!(recognize!(tuple!(entityColFunctionImportCall, opt!(collectionNavigation))), ast::ResourcePath::Unimplemented)
+		| map!(recognize!(tuple!(entityFunctionImportCall, opt!(singleNavigation))), ast::ResourcePath::Unimplemented)
+		| map!(recognize!(tuple!(complexColFunctionImportCall, opt!(complexColPath))), ast::ResourcePath::Unimplemented)
+		| map!(recognize!(tuple!(complexFunctionImportCall, opt!(complexPath))), ast::ResourcePath::Unimplemented)
+		| map!(recognize!(tuple!(primitiveColFunctionImportCall, opt!(primitiveColPath))), ast::ResourcePath::Unimplemented)
+		| map!(recognize!(tuple!(primitiveFunctionImportCall, opt!(primitivePath))), ast::ResourcePath::Unimplemented)
+		| map!(functionImportCallNoParens, ast::ResourcePath::Unimplemented)
+		| map!(crossjoin, ast::ResourcePath::Unimplemented)
+		| map!(recognize!(tuple!(tag!("$all"), opt!(tuple!(tag!("/"), qualifiedEntityTypeName)))), ast::ResourcePath::Unimplemented)
+	)
+}
+
 //*
 //* collectionNavigation = [ "/" qualifiedEntityTypeName ] [ collectionNavPath ]
 named!(collectionNavigation<&str, &str>, recognize!(tuple!(opt!(tuple!(tag!("/"), qualifiedEntityTypeName)), opt!(collectionNavPath))));
@@ -1316,6 +1334,14 @@ named!(namespace<&str, &str>, recognize!(tuple!(namespacePart, many0!(tuple!(tag
 named!(namespacePart<&str, &str>, recognize!(odataIdentifier));
 //*
 //* entitySetName       = odataIdentifier
+fn entitySetName_wip<'a>(input: &'a str, container: &'a schema::EntityContainer) -> IResult<&'a str, &'a schema::EntitySet> {
+	map_opt!(input, recognize!(odataIdentifier), |name: &str| {
+		if let Some(schema::EntityContainerMember::EntitySet(member)) = container.members.get(name) {
+			return Some(member);
+		}
+		return None;
+	})
+}
 named!(entitySetName<&str, &str>, recognize!(odataIdentifier));
 //* singletonEntity     = odataIdentifier
 named!(singletonEntity<&str, &str>, recognize!(odataIdentifier));
