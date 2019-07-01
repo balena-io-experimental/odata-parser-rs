@@ -1,17 +1,17 @@
 use super::schema;
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct ODataURI<'a> {
 	pub service_root: ServiceRoot<'a>,
 	pub relative_uri: RelativeURI<'a>,
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct ServiceRoot<'a> {
 	pub data: &'a str,
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum RelativeURI<'a> {
 	None,
 	Batch(Option<Vec<QueryOption<'a>>>),
@@ -20,7 +20,7 @@ pub enum RelativeURI<'a> {
 	Resource(ResourcePath<'a>),
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum ResourcePath<'a> {
 	Unimplemented(&'a str),
 	EntitySet(&'a schema::EntitySet),
@@ -33,7 +33,7 @@ impl<'a> From<&'a str> for ResourcePath<'a> {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum FormatKind<'a> {
 	JSON,
 	Atom,
@@ -41,7 +41,7 @@ pub enum FormatKind<'a> {
 	Custom(&'a str),
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum QueryOption<'a> {
 	Format(FormatKind<'a>),
 	Custom(&'a str),
