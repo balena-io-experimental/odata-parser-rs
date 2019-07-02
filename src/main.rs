@@ -18,7 +18,7 @@ fn main() {
 		members: HashMap::new(),
 	});
 
-	let mut user = schema::EntityType{
+	let mut user = schema::kind::Entity{
 		name: String::from("user"),
 		key: Some(vec![String::from("id")]),
 		base_type: None,
@@ -28,9 +28,9 @@ fn main() {
 		properties: HashMap::new(),
 	};
 
-	let property = schema::StructuralProperty{
+	let property = schema::property::Structural{
 		name: String::from("username"),
-		kind: schema::PropertyType::PrimitiveType(schema::PrimitiveType::String),
+		kind: schema::property::Type::Primitive(schema::kind::Primitive::String),
 		collection: false,
 		nullable: false,
 		max_length: 20,
@@ -40,9 +40,9 @@ fn main() {
 		srid: 0,
 	};
 
-	user.properties.insert(property.name.clone(), schema::Property::StructuralProperty(property));
+	user.properties.insert(property.name.clone(), schema::property::Property::Structural(property));
 
-	doc.schema.members.insert(user.name.clone(), schema::SchemaMember::EntityType(user.clone()));
+	doc.schema.members.insert(user.name.clone(), schema::SchemaMember::Entity(user.clone()));
 
 	let entity_set = schema::EntitySet{
 		name: String::from("users"),

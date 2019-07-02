@@ -5,51 +5,6 @@
 
 use std::collections::HashMap;
 
-#[derive(Clone,Debug,Eq,PartialEq)]
-pub enum PrimitiveType {
-	Binary,
-	Boolean,
-	Byte,
-	Date,
-	DateTimeOffset,
-	Decimal,
-	Double,
-	Duration,
-	Guid,
-	Int16,
-	Int32,
-	Int64,
-	SByte,
-	Single,
-	Stream,
-	String,
-	TimeOfDay,
-	Geography,
-	GeographyPoint,
-	GeographyLineString,
-	GeographyPolygon,
-	GeographyMultiPoint,
-	GeographyMultiLineString,
-	GeographyMultiPolygon,
-	GeographyCollection,
-	Geometry,
-	GeometryPoint,
-	GeometryLineString,
-	GeometryPolygon,
-	GeometryMultiPoint,
-	GeometryMultiLineString,
-	GeometryMultiPolygon,
-	GeometryCollection,
-}
-
-#[derive(Debug,Eq,PartialEq)]
-pub enum AbstractType {
-	PrimitiveType,
-	ComplexType,
-	EntityType,
-	Untyped,
-}
-
 #[derive(Debug,Eq,PartialEq)]
 pub enum VocabularyType {
 	AnnotationPath,
@@ -128,109 +83,164 @@ impl Schema {
 
 #[derive(Debug,Eq,PartialEq)]
 pub enum SchemaMember {
-	EntityType(EntityType),
-	ComplexType,
-	EnumerationType,
+	Entity(kind::Entity),
+	Complex,
+	Enumeration,
 	TypeDefinition,
 	Action,
 	Function,
 	EntityContainer(EntityContainer),
 }
 
-#[derive(Clone,Debug,Eq,PartialEq)]
-pub struct EntityType {
-	pub name: String,
-	pub key: Option<Vec<Identifier>>,
-	pub base_type: Option<Identifier>,
-	pub is_abstract: bool,
-	pub open_type: bool,
-	pub has_stream: bool,
-	pub properties: HashMap<Identifier, Property>,
+pub mod kind {
+	use std::collections::HashMap;
+	use super::Identifier;
+
+	#[derive(Clone,Debug,Eq,PartialEq)]
+	pub enum Primitive {
+		Binary,
+		Boolean,
+		Byte,
+		Date,
+		DateTimeOffset,
+		Decimal,
+		Double,
+		Duration,
+		Guid,
+		Int16,
+		Int32,
+		Int64,
+		SByte,
+		Single,
+		Stream,
+		String,
+		TimeOfDay,
+		Geography,
+		GeographyPoint,
+		GeographyLineString,
+		GeographyPolygon,
+		GeographyMultiPoint,
+		GeographyMultiLineString,
+		GeographyMultiPolygon,
+		GeographyCollection,
+		Geometry,
+		GeometryPoint,
+		GeometryLineString,
+		GeometryPolygon,
+		GeometryMultiPoint,
+		GeometryMultiLineString,
+		GeometryMultiPolygon,
+		GeometryCollection,
+	}
+
+	#[derive(Debug,Eq,PartialEq)]
+	pub enum Abstract {
+		Primitive,
+		Complex,
+		Entity,
+		Untyped,
+	}
+
+	#[derive(Clone,Debug,Eq,PartialEq)]
+	pub struct Entity {
+		pub name: String,
+		pub key: Option<Vec<Identifier>>,
+		pub base_type: Option<Identifier>,
+		pub is_abstract: bool,
+		pub open_type: bool,
+		pub has_stream: bool,
+		pub properties: HashMap<Identifier, super::property::Property>,
+	}
+
+	#[derive(Clone,Debug,Eq,PartialEq)]
+	pub struct Complex {
+		pub name: String,
+		pub base_type: Option<Identifier>,
+		pub is_abstract: bool,
+		pub open_type: bool,
+		pub properties: HashMap<Identifier, super::property::Property>,
+	}
+
+	#[derive(Clone,Debug,Eq,PartialEq)]
+	pub struct Enumeration {
+		pub name: String,
+		pub underlying_type: EnumBase,
+		pub is_flags: bool,
+		pub members: HashMap<Identifier, i64>,
+	}
+
+	#[derive(Clone,Debug,Eq,PartialEq)]
+	pub enum EnumBase {
+		Byte,
+		SByte,
+		Int16,
+		Int32,
+		Int64,
+	}
+
+	#[derive(Debug,Eq,PartialEq)]
+	pub struct TypeDefinition {
+		pub name: Identifier,
+		pub underlying_type: Primitive,
+		pub max_length: u32,
+		pub unicode: bool,
+		pub precision: u32,
+		pub scale: u32,
+		pub srid: u32
+	}
 }
 
-#[derive(Clone,Debug,Eq,PartialEq)]
-pub enum Property {
-	StructuralProperty(StructuralProperty),
-	NavigationProperty(NavigationProperty),
+pub mod property {
+	use super::Identifier;
+
+	#[derive(Clone,Debug,Eq,PartialEq)]
+	pub enum Property {
+		Structural(Structural),
+		Navigation(Navigation),
+	}
+
+	#[derive(Clone,Debug,Eq,PartialEq)]
+	pub enum Type {
+		Primitive(super::kind::Primitive),
+		Complex(super::kind::Complex),
+		Enumeration(super::kind::Enumeration),
+	}
+
+	#[derive(Clone,Debug,Eq,PartialEq)]
+	pub struct Structural {
+		pub name: Identifier,
+		pub kind: Type,
+		pub collection: bool,
+		pub nullable: bool,
+		pub max_length: u32,
+		pub unicode: bool,
+		pub precision: u32,
+		pub scale: u32,
+		pub srid: u32,
+		// pub default_value: T,
+	}
+
+	#[derive(Clone,Debug,Eq,PartialEq)]
+	pub struct Navigation {
+		pub name: Identifier,
+		pub kind: Identifier,
+		pub collection: bool,
+		pub nullable: bool,
+		pub partner: Identifier,
+		pub contains_target: bool,
+		// FIXME pub referential_constraint: HashMap<&'a Property<'a>, &'a Property<'a>>,
+		pub on_delete: OnDeleteAction,
+	}
+
+	#[derive(Clone,Debug,Eq,PartialEq)]
+	pub enum OnDeleteAction {
+		Cascade,
+		None,
+		SetNull,
+		SetDefault,
+	}
 }
 
-#[derive(Clone,Debug,Eq,PartialEq)]
-pub enum PropertyType {
-	PrimitiveType(PrimitiveType),
-	ComplexType(ComplexType),
-	EnumerationType(EnumerationType),
-}
-
-#[derive(Clone,Debug,Eq,PartialEq)]
-pub struct StructuralProperty {
-	pub name: Identifier,
-	pub kind: PropertyType,
-	pub collection: bool,
-	pub nullable: bool,
-	pub max_length: u32,
-	pub unicode: bool,
-	pub precision: u32,
-	pub scale: u32,
-	pub srid: u32,
-	// pub default_value: T,
-}
-
-#[derive(Clone,Debug,Eq,PartialEq)]
-pub struct NavigationProperty {
-	pub name: Identifier,
-	pub kind: Identifier,
-	pub collection: bool,
-	pub nullable: bool,
-	pub partner: Identifier,
-	pub contains_target: bool,
-	// FIXME pub referential_constraint: HashMap<&'a Property<'a>, &'a Property<'a>>,
-	pub on_delete: OnDeleteAction,
-}
-
-#[derive(Clone,Debug,Eq,PartialEq)]
-pub enum OnDeleteAction {
-	Cascade,
-	None,
-	SetNull,
-	SetDefault,
-}
-
-#[derive(Clone,Debug,Eq,PartialEq)]
-pub struct ComplexType {
-	pub name: String,
-	pub base_type: Option<Identifier>,
-	pub is_abstract: bool,
-	pub open_type: bool,
-	pub properties: HashMap<Identifier, Property>,
-}
-
-#[derive(Clone,Debug,Eq,PartialEq)]
-pub struct EnumerationType {
-	pub name: String,
-	pub underlying_type: EnumerationUnderlyingType,
-	pub is_flags: bool,
-	pub members: HashMap<Identifier, i64>,
-}
-
-#[derive(Clone,Debug,Eq,PartialEq)]
-pub enum EnumerationUnderlyingType {
-	Byte,
-	SByte,
-	Int16,
-	Int32,
-	Int64,
-}
-
-#[derive(Debug,Eq,PartialEq)]
-pub struct TypeDefinition {
-	pub name: Identifier,
-	pub underlying_type: PrimitiveType,
-	pub max_length: u32,
-	pub unicode: bool,
-	pub precision: u32,
-	pub scale: u32,
-	pub srid: u32
-}
 
 #[derive(Debug,Eq,PartialEq)]
 pub struct Action {
@@ -295,7 +305,7 @@ pub enum EntityContainerMember {
 pub struct EntitySet {
 	pub name: Identifier,
 	pub include_in_service_document: bool,
-	pub kind: EntityType,
+	pub kind: kind::Entity,
 }
 
 #[derive(Debug,Eq,PartialEq)]

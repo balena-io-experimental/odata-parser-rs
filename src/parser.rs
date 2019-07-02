@@ -198,7 +198,7 @@ fn resourcePath<'a>(input: &'a str, entity_container: &'a schema::EntityContaine
 //*
 //* collectionNavigation = [ "/" qualifiedEntityTypeName ] [ collectionNavPath ]
 named!(collectionNavigation<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedEntityTypeName))), opt(collectionNavPath))))));
-fn collectionNavigation_wip<'a>(input: &'a str, kind: &'a schema::EntityType) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn collectionNavigation_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	do_parse!(input,
 		cast: call!(opt(preceded(tag("/"), qualifiedEntityTypeName))) >>
 		path: call!(opt(|i| collectionNavPath_wip(i, kind))) >>
@@ -231,7 +231,7 @@ named!(collectionNavPath<&str, &str>, call!(alt((recognize(tuple((keyPredicate, 
 					   , count
 					   , _ref
 					))));
-fn collectionNavPath_wip<'a>(input: &'a str, kind: &'a schema::EntityType) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn collectionNavPath_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	alt((
 		value(vec![ast::PathSegment::Filter], recognize(tuple((filterInPath, opt(collectionNavigation))))),
 		value(vec![ast::PathSegment::Each], recognize(tuple((each, opt(boundOperation))))),
@@ -254,7 +254,7 @@ fn collectionNavPath_wip<'a>(input: &'a str, kind: &'a schema::EntityType) -> IR
 //*
 //* keyPredicate     = simpleKey / compoundKey / keyPathSegments
 named!(keyPredicate<&str, &str>, call!(alt((simpleKey, compoundKey, keyPathSegments))));
-fn keyPredicate_wip<'a>(input: &'a str, kind: &'a schema::EntityType) -> IResult<&'a str, ast::KeyPredicate> {
+fn keyPredicate_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResult<&'a str, ast::KeyPredicate> {
 	//FIXME
 	alt((
 		value(ast::KeyPredicate::Simple, simpleKey),
@@ -288,7 +288,7 @@ named!(singleNavigation<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"),
 														   , _ref
 														   , _value
 														   ))))))));
-fn singleNavigation_wip<'a>(input: &'a str, kind: &'a schema::EntityType) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn singleNavigation_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	//FIXME
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedEntityTypeName)))(input)?;
 	let (input, path) = opt(alt((
@@ -324,21 +324,24 @@ named!(propertyPath<&str, &str>, call!(recognize(alt((tuple((entityColNavigation
 						 , tuple((primitiveProperty, opt(primitivePath)))
 						 , tuple((streamProperty, opt(boundOperation)))
 						 )))));
-fn propertyPath_wip<'a>(input: &'a str, kind: &'a schema::EntityType) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn propertyPath_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+	use schema::kind;
+	use schema::property::*;
+
 	let (input, ident) = odataIdentifier(input)?;
 
 	let property = kind.properties.get(ident).unwrap();//FIXME
 
 	let (input, path) = match property {
-		schema::Property::NavigationProperty(schema::NavigationProperty{collection: true, ..}) => collectionNavigation_wip(input, kind)?,
-		schema::Property::NavigationProperty(schema::NavigationProperty{collection: false, ..}) => singleNavigation_wip(input, kind)?,
-		schema::Property::StructuralProperty(schema::StructuralProperty{kind: schema::PropertyType::ComplexType(_), collection: true, ..}) => value(vec![], complexColPath)(input)?,
-		schema::Property::StructuralProperty(schema::StructuralProperty{kind: schema::PropertyType::ComplexType(_), collection: false, ..}) => value(vec![], complexPath)(input)?,
-		schema::Property::StructuralProperty(schema::StructuralProperty{kind: schema::PropertyType::PrimitiveType(schema::PrimitiveType::Stream), collection: false, ..}) => value(vec![], boundOperation)(input)?,
-		schema::Property::StructuralProperty(schema::StructuralProperty{kind: schema::PropertyType::PrimitiveType(_), collection: true, ..}) => value(vec![], primitiveColPath)(input)?,
-		schema::Property::StructuralProperty(schema::StructuralProperty{kind: schema::PropertyType::PrimitiveType(_), collection: false, ..}) => value(vec![], primitivePath)(input)?,
-		schema::Property::StructuralProperty(schema::StructuralProperty{kind: schema::PropertyType::EnumerationType(_), collection: true, ..}) => value(vec![], primitiveColPath)(input)?,
-		schema::Property::StructuralProperty(schema::StructuralProperty{kind: schema::PropertyType::EnumerationType(_), collection: false, ..}) => value(vec![], primitivePath)(input)?,
+		Property::Navigation(Navigation{collection: true, ..}) => collectionNavigation_wip(input, kind)?,
+		Property::Navigation(Navigation{collection: false, ..}) => singleNavigation_wip(input, kind)?,
+		Property::Structural(Structural{kind: Type::Complex(_), collection: true, ..}) => value(vec![], complexColPath)(input)?,
+		Property::Structural(Structural{kind: Type::Complex(_), collection: false, ..}) => value(vec![], complexPath)(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(kind::Primitive::Stream), collection: false, ..}) => value(vec![], boundOperation)(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(_), collection: true, ..}) => value(vec![], primitiveColPath)(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(_), collection: false, ..}) => value(vec![], primitivePath)(input)?,
+		Property::Structural(Structural{kind: Type::Enumeration(_), collection: true, ..}) => value(vec![], primitiveColPath)(input)?,
+		Property::Structural(Structural{kind: Type::Enumeration(_), collection: false, ..}) => value(vec![], primitivePath)(input)?,
 	};
 
 	// let result = vec![ast::PathSegment::Property(property)];
