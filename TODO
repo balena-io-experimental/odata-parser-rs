@@ -1,0 +1,1 @@
+* arguments to the value() function (and other combinator functions in general) are evaluated before the underlying parser runs so for vectors we never skip the allocation. Find a way to avoid allocating a vector if the underlying parser fails
