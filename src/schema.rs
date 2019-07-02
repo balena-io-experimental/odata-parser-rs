@@ -1,3 +1,8 @@
+//FIXME
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+
 use std::collections::HashMap;
 
 #[derive(Clone,Debug,Eq,PartialEq)]
@@ -60,6 +65,7 @@ pub struct Document {
 	pub reference: Option<Reference>,
 	pub namespace: Namespace,
 	pub schema: Schema,
+	pub service_root: String,
 }
 
 impl Document {
@@ -68,6 +74,7 @@ impl Document {
 			version: String::from("4.01"),
 			reference: None,
 			namespace: String::from("foo.org"),
+			service_root: String::from("https://example.com/foobar/"),
 			schema: Schema{
 				namespace: String::from("foo.org"),
 				alias: None,
@@ -144,7 +151,7 @@ pub struct EntityType {
 #[derive(Clone,Debug,Eq,PartialEq)]
 pub enum Property {
 	StructuralProperty(StructuralProperty),
-	NavigationProperty(StructuralProperty),
+	NavigationProperty(NavigationProperty),
 }
 
 #[derive(Clone,Debug,Eq,PartialEq)]

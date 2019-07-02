@@ -3,8 +3,8 @@
 #[macro_use]
 extern crate nom;
 
-mod parser;
-mod ast;
+pub mod parser;
+pub mod ast;
 mod schema;
 
 use std::collections::HashMap;
@@ -50,7 +50,7 @@ fn main() {
 		kind: user.clone(),
 	};
 
-	let mut entity_container = doc.schema.get_entity_container_mut();
+	let entity_container = doc.schema.get_entity_container_mut();
 
 	entity_container.members.insert(entity_set.name.clone(), schema::EntityContainerMember::EntitySet(entity_set.clone()));
 
@@ -58,6 +58,6 @@ fn main() {
 	println!("{:#?}", doc);
 
 	// println!("{:?}", parser::odataRelativeUri("ProductsByComplex(complex=@c)?@c={\"@odata.type\":\"Model.Customer\",\"Name\":\"Value\"}\n"));
-	println!("{:#?}", parser::odataUri("https://example.com/foobar/users\n", &doc.schema));
+	println!("{:#?}", parser::odataUri("https://example.com/foobar/users/$count\n", &doc));
 }
 

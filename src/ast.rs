@@ -1,8 +1,11 @@
+//FIXME
+#![allow(dead_code)]
+
 use super::schema;
 
 #[derive(Debug,Clone)]
 pub struct ODataURI<'a> {
-	pub service_root: ServiceRoot<'a>,
+	pub service_root: &'a str,
 	pub relative_uri: RelativeURI<'a>,
 }
 
@@ -21,17 +24,36 @@ pub enum RelativeURI<'a> {
 }
 
 #[derive(Debug,Clone)]
-pub enum ResourcePath<'a> {
-	Unimplemented(&'a str),
-	EntitySet(&'a schema::EntitySet),
+pub struct ResourcePath<'a> {
+	pub segments: Vec<PathSegment<'a>>,
 }
 
-impl<'a> From<&'a str> for ResourcePath<'a> {
-	fn from(s: &'a str) -> Self {
-		ResourcePath::Unimplemented(s)
-	}
+#[derive(Debug,Clone)]
+pub enum PathSegment<'a> {
+	EntitySet(&'a schema::EntitySet),  // -> collectionNavigation
+	Singleton,                  // -> singleNavigation
+	Action,                     // -> ()
+	Function,                   // -> collection,single,complexCollection,complex,primitiveCollection,primitive,() navigation
+	Crossjoin,                  // -> ()
+	All,                        // -> ()
+	Cast,
+	BoundOperation,             // -> ()
+	Count,                      // -> ()
+	Each,                       // -> boundOperation
+	Filter,                     // -> collectionNavigation
+	KeyPredicate(KeyPredicate), // -> singleNavigation
+	Property,                   // -> single,collection,complexCollection,complex,primitiveCollection,primitive,boundOperation
+	Ref,                        // -> ()
+	Value,
+	OrdinalIndex,
 }
 
+#[derive(Debug,Clone)]
+pub enum KeyPredicate {
+	Simple,
+	Compound,
+	KeyPathSegment,
+}
 
 #[derive(Debug,Clone)]
 pub enum FormatKind<'a> {
