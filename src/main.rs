@@ -57,7 +57,8 @@ fn main() {
 
 	println!("{:#?}", doc);
 
+	let mut p = parser::Parser::new(&doc);
 	// println!("{:?}", parser::odataRelativeUri("ProductsByComplex(complex=@c)?@c={\"@odata.type\":\"Model.Customer\",\"Name\":\"Value\"}\n"));
-	println!("{:#?}", parser::odataUri("https://example.com/foobar/users/$count\n", &doc));
+	println!("{:#?}", p.parse("https://example.com/foobar/users/$count\n"));
 }
 

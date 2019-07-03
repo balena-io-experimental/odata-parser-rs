@@ -110,10 +110,27 @@ use nom::branch::*;
 //*
 //*
 //* odataUri = serviceRoot [ odataRelativeUri ]
-pub fn odataUri<'a>(input: &'a str, document: &'a schema::Document) -> IResult<&'a str, ast::ODataURI<'a>> {
+
+pub struct Parser<'a> {
+	document: &'a schema::Document,
+}
+
+impl<'a> Parser<'a> {
+	pub fn new(document: &'a schema::Document) -> Self {
+		Parser{
+			document: document,
+		}
+	}
+
+	pub fn parse(&'a mut self, input: &'a str) -> IResult<&'a str, ast::ODataURI<'a>> {
+		odataUri(input, self, self.document)
+	}
+}
+
+pub fn odataUri<'a>(input: &'a str, ctx: &'a Parser, document: &'a schema::Document) -> IResult<&'a str, ast::ODataURI<'a>> {
 	do_parse!(input,
-		service_root: call!(serviceRoot, &document.service_root) >>
-		relative_uri: call!(opt(|input| odataRelativeUri(input, &document.schema))) >>
+		service_root: call!(serviceRoot, ctx, &document.service_root) >>
+		relative_uri: call!(opt(|input| odataRelativeUri(input, ctx, &document.schema))) >>
 		(ast::ODataURI{service_root, relative_uri: relative_uri.unwrap_or(ast::RelativeURI::None)})
 	)
 }
@@ -121,7 +138,7 @@ pub fn odataUri<'a>(input: &'a str, document: &'a schema::Document) -> IResult<&
 //* serviceRoot = ( "https" / "http" )                    ; Note: case-insensitive
 //*               "://" host [ ":" port ]
 //*               "/" *( segment-nz "/" )
-fn serviceRoot<'a>(input: &'a str, service_root: &'a str) -> IResult<&'a str, &'a str> {
+fn serviceRoot<'a>(input: &'a str, ctx: &Parser, service_root: &'a str) -> IResult<&'a str, &'a str> {
 	// FIXME this should be relaxed to accept case-insensitive http(s), default ports, etc
 	tag(service_root)(input)
 }
@@ -133,7 +150,7 @@ fn serviceRoot<'a>(input: &'a str, service_root: &'a str) -> IResult<&'a str, &'
 //*                  / '$entity' "/" qualifiedEntityTypeName "?" entityCastOptions
 //*                  / '$metadata' [ "?" metadataOptions ] [ context ]
 //*                  / resourcePath [ "?" queryOptions ]
-fn odataRelativeUri<'a>(input: &'a str, schema: &'a schema::Schema)-> IResult<&'a str, ast::RelativeURI<'a>> {
+fn odataRelativeUri<'a>(input: &'a str, ctx: &'a Parser, schema: &'a schema::Schema)-> IResult<&'a str, ast::RelativeURI<'a>> {
 	alt((
 		map(preceded(tag("$batch"), opt(preceded(tag("?"), batchOptions))), ast::RelativeURI::Batch)
 		, value(ast::RelativeURI::Entity, tuple((tag("$entity"), tag("?"), entityOptions)))
@@ -141,7 +158,7 @@ fn odataRelativeUri<'a>(input: &'a str, schema: &'a schema::Schema)-> IResult<&'
 		, value(ast::RelativeURI::Metadata, tuple((tag("$metadata"), opt(tuple((tag("?"), metadataOptions))), opt(context))))
 		, |input: &'a str| {
 			do_parse!(input,
-				resource_path: call!(resourcePath, schema.get_entity_container()) >>
+				resource_path: call!(resourcePath, ctx, schema.get_entity_container()) >>
 				options: call!(opt(preceded(tag("?"), queryOptions))) >>
 				(ast::RelativeURI::Resource(resource_path))
 			)
@@ -167,12 +184,12 @@ fn odataRelativeUri<'a>(input: &'a str, schema: &'a schema::Schema)-> IResult<&'
 //*              / functionImportCallNoParens
 //*              / crossjoin
 //*              / '$all'                         [ "/" qualifiedEntityTypeName ]
-fn resourcePath<'a>(input: &'a str, entity_container: &'a schema::EntityContainer) -> IResult<&'a str, ast::ResourcePath<'a>> {
+fn resourcePath<'a>(input: &'a str, ctx: &'a Parser, entity_container: &'a schema::EntityContainer) -> IResult<&'a str, ast::ResourcePath<'a>> {
 	map(
 		alt((
 			|i: &'a str| {
-				let (i, entity_set) = entitySetName_wip(i, entity_container)?;
-				let (i, options) = opt(|i: &'a str| collectionNavigation_wip(i, &entity_set.kind))(i)?;
+				let (i, entity_set) = entitySetName_wip(i, ctx, entity_container)?;
+				let (i, options) = opt(|i: &'a str| collectionNavigation_wip(i, ctx, &entity_set.kind))(i)?;
 
 				let mut path = vec![ast::PathSegment::EntitySet(entity_set)];
 				if let Some(mut options) = options {
@@ -198,10 +215,10 @@ fn resourcePath<'a>(input: &'a str, entity_container: &'a schema::EntityContaine
 //*
 //* collectionNavigation = [ "/" qualifiedEntityTypeName ] [ collectionNavPath ]
 named!(collectionNavigation<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedEntityTypeName))), opt(collectionNavPath))))));
-fn collectionNavigation_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn collectionNavigation_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	do_parse!(input,
 		cast: call!(opt(preceded(tag("/"), qualifiedEntityTypeName))) >>
-		path: call!(opt(|i| collectionNavPath_wip(i, kind))) >>
+		path: call!(opt(|i| collectionNavPath_wip(i, ctx, kind))) >>
 		({
 			let mut result = vec![];
 			if let Some(cast) = cast {
@@ -231,16 +248,16 @@ named!(collectionNavPath<&str, &str>, call!(alt((recognize(tuple((keyPredicate, 
 					   , count
 					   , _ref
 					))));
-fn collectionNavPath_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn collectionNavPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	alt((
 		value(vec![ast::PathSegment::Filter], recognize(tuple((filterInPath, opt(collectionNavigation))))),
 		value(vec![ast::PathSegment::Each], recognize(tuple((each, opt(boundOperation))))),
-		boundOperation_wip,
+		|i| boundOperation_wip(i, ctx),
 		map(count_wip, |s| vec![s]),
 		map(_ref_wip, |s| vec![s]),
 		|i| {
-			let (i, key) = keyPredicate_wip(i, kind)?;
-			let (i, path) = opt(|i| singleNavigation_wip(i, kind))(i)?;
+			let (i, key) = keyPredicate_wip(i, ctx, kind)?;
+			let (i, path) = opt(|i| singleNavigation_wip(i, ctx, kind))(i)?;
 
 			let mut result = vec![ast::PathSegment::KeyPredicate(key)];
 			if let Some(mut path) = path {
@@ -254,7 +271,7 @@ fn collectionNavPath_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> 
 //*
 //* keyPredicate     = simpleKey / compoundKey / keyPathSegments
 named!(keyPredicate<&str, &str>, call!(alt((simpleKey, compoundKey, keyPathSegments))));
-fn keyPredicate_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResult<&'a str, ast::KeyPredicate> {
+fn keyPredicate_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, ast::KeyPredicate> {
 	//FIXME
 	alt((
 		value(ast::KeyPredicate::Simple, simpleKey),
@@ -288,12 +305,12 @@ named!(singleNavigation<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"),
 														   , _ref
 														   , _value
 														   ))))))));
-fn singleNavigation_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn singleNavigation_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	//FIXME
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedEntityTypeName)))(input)?;
 	let (input, path) = opt(alt((
-		value(vec![ast::PathSegment::Property], preceded(tag("/"), |i| propertyPath_wip(i, kind))),
-		boundOperation_wip,
+		value(vec![ast::PathSegment::Property], preceded(tag("/"), |i| propertyPath_wip(i, ctx, kind))),
+		|i| boundOperation_wip(i, ctx),
 		map(_ref_wip, |s| vec![s]),
 		map(_value_wip, |s| vec![s]),
 	)))(input)?;
@@ -324,7 +341,7 @@ named!(propertyPath<&str, &str>, call!(recognize(alt((tuple((entityColNavigation
 						 , tuple((primitiveProperty, opt(primitivePath)))
 						 , tuple((streamProperty, opt(boundOperation)))
 						 )))));
-fn propertyPath_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn propertyPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	use schema::kind;
 	use schema::property::*;
 
@@ -333,15 +350,15 @@ fn propertyPath_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResu
 	let property = kind.properties.get(ident).unwrap();//FIXME
 
 	let (input, path) = match property {
-		Property::Navigation(Navigation{collection: true, ..}) => collectionNavigation_wip(input, kind)?,
-		Property::Navigation(Navigation{collection: false, ..}) => singleNavigation_wip(input, kind)?,
-		Property::Structural(Structural{kind: Type::Complex(_), collection: true, ..}) => complexColPath_wip(input)?,
-		Property::Structural(Structural{kind: Type::Complex(_), collection: false, ..}) => complexPath_wip(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(kind::Primitive::Stream), ..}) => boundOperation_wip(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(_), collection: true, ..}) => primitiveColPath_wip(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(_), collection: false, ..}) => primitivePath_wip(input)?,
-		Property::Structural(Structural{kind: Type::Enumeration(_), collection: true, ..}) => primitiveColPath_wip(input)?,
-		Property::Structural(Structural{kind: Type::Enumeration(_), collection: false, ..}) => primitivePath_wip(input)?,
+		Property::Navigation(Navigation{collection: true, ..}) => collectionNavigation_wip(input, ctx, kind)?,
+		Property::Navigation(Navigation{collection: false, ..}) => singleNavigation_wip(input, ctx, kind)?,
+		Property::Structural(Structural{kind: Type::Complex(_), collection: true, ..}) => complexColPath_wip(input, ctx)?,
+		Property::Structural(Structural{kind: Type::Complex(_), collection: false, ..}) => complexPath_wip(input, ctx)?,
+		Property::Structural(Structural{kind: Type::Primitive(kind::Primitive::Stream), ..}) => boundOperation_wip(input, ctx)?,
+		Property::Structural(Structural{kind: Type::Primitive(_), collection: true, ..}) => primitiveColPath_wip(input, ctx)?,
+		Property::Structural(Structural{kind: Type::Primitive(_), collection: false, ..}) => primitivePath_wip(input, ctx)?,
+		Property::Structural(Structural{kind: Type::Enumeration(_), collection: true, ..}) => primitiveColPath_wip(input, ctx)?,
+		Property::Structural(Structural{kind: Type::Enumeration(_), collection: false, ..}) => primitivePath_wip(input, ctx)?,
 	};
 
 	//FIXME
@@ -356,21 +373,21 @@ fn propertyPath_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResu
 //*
 //* primitiveColPath = count / boundOperation / ordinalIndex
 named!(primitiveColPath<&str, &str>, call!(alt((count, boundOperation, ordinalIndex))));
-fn primitiveColPath_wip<'a>(input: &'a str) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn primitiveColPath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	alt((
 		map(count_wip, |c| vec![c]),
-		boundOperation_wip,
-		map(ordinalIndex_wip, |index| vec![index]),
+		|i| boundOperation_wip(i, ctx),
+		map(|i| ordinalIndex_wip(i, ctx), |index| vec![index]),
 	))(input)
 }
 
 //*
 //* primitivePath  = value / boundOperation
 named!(primitivePath<&str, &str>, call!(alt((_value, boundOperation))));
-fn primitivePath_wip<'a>(input: &'a str) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn primitivePath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	alt((
 		map(_value_wip, |c| vec![c]),
-		boundOperation_wip
+		|i| boundOperation_wip(i, ctx)
 	))(input)
 }
 //*
@@ -379,12 +396,12 @@ fn primitivePath_wip<'a>(input: &'a str) -> IResult<&'a str, Vec<ast::PathSegmen
 //  The ABNF doesn't allow selecting a specific element and then continuing with a complexPath
 //  rule. Is this a mistake?
 named!(complexColPath<&str, &str>, call!(alt((ordinalIndex, recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((count, boundOperation))))))))));
-fn complexColPath_wip<'a>(input: &'a str) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn complexColPath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	alt((
-		map(ordinalIndex_wip, |index| vec![index]),
+		map(|i| ordinalIndex_wip(i, ctx), |index| vec![index]),
 		|input| {
 			let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedComplexTypeName)))(input)?;
-			let (input, path) = opt(alt((map(count_wip, |s| vec![s]), boundOperation_wip)))(input)?;
+			let (input, path) = opt(alt((map(count_wip, |s| vec![s]), |i| boundOperation_wip(i, ctx))))(input)?;
 
 			let mut result = vec![];
 			if let Some(cast) = cast {
@@ -403,11 +420,11 @@ fn complexColPath_wip<'a>(input: &'a str) -> IResult<&'a str, Vec<ast::PathSegme
 //*                  / boundOperation
 //*                  ]
 named!(complexPath<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((recognize(tuple((tag("/"), propertyPath))), boundOperation))))))));
-fn complexPath_wip<'a>(input: &'a str) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn complexPath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedComplexTypeName)))(input)?;
 	let (input, path) = opt(alt((
 		value(vec![ast::PathSegment::Property], preceded(tag("/"), propertyPath)),
-		boundOperation_wip,
+		|i| boundOperation_wip(i, ctx),
 	)))(input)?;
 
 	let mut result = vec![];
@@ -441,7 +458,7 @@ named!(_value_wip<&str, ast::PathSegment>, call!(value(ast::PathSegment::Value, 
 //  indices too. See:
 //  http://docs.oasis-open.org/odata/odata/v4.01/cs01/part1-protocol/odata-v4.01-cs01-part1-protocol.html#sec_RequestinganIndividualMemberofanOrde
 named!(ordinalIndex<&str, &str>, call!(recognize(tuple((tag("/"), many1(DIGIT))))));
-fn ordinalIndex_wip(input: &str) -> IResult<&str, ast::PathSegment> {
+fn ordinalIndex_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, ast::PathSegment<'a>> {
 	map(preceded(tag("/"), map_res(recognize(tuple((opt(tag("-")), digit1))), |n: &str| n.parse())), ast::PathSegment::OrdinalIndex)(input)
 }
 //*
@@ -466,7 +483,7 @@ named!(boundOperation<&str, &str>, call!(recognize(tuple((tag("/"), alt((boundAc
 								     , recognize(tuple((boundPrimitiveFunctionCall, opt(primitivePath))))
 								     , boundFunctionCallNoParens
 								     )))))));
-fn boundOperation_wip(input: &str) -> IResult<&str, Vec<ast::PathSegment>> {
+fn boundOperation_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	value(vec![], boundOperation)(input)
 }
 //*
@@ -1515,7 +1532,7 @@ named!(namespace<&str, &str>, call!(recognize(tuple((namespacePart, many0(tuple(
 named!(namespacePart<&str, &str>, call!(recognize(odataIdentifier)));
 //*
 //* entitySetName       = odataIdentifier
-fn entitySetName_wip<'a>(input: &'a str, container: &'a schema::EntityContainer) -> IResult<&'a str, &'a schema::EntitySet> {
+fn entitySetName_wip<'a>(input: &'a str, ctx: &Parser, container: &'a schema::EntityContainer) -> IResult<&'a str, &'a schema::EntitySet> {
 	map_opt(recognize(odataIdentifier), |name: &str| {
 		if let Some(schema::EntityContainerMember::EntitySet(member)) = container.members.get(name) {
 			return Some(member);
