@@ -6,3 +6,7 @@ edition = "2018"
 
 [dependencies]
 nom = "^5"
+
+[profile.release]
+lto = true
+codegen-units = 1
