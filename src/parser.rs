@@ -235,9 +235,9 @@ fn collectionNavPath_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> 
 	alt((
 		value(vec![ast::PathSegment::Filter], recognize(tuple((filterInPath, opt(collectionNavigation))))),
 		value(vec![ast::PathSegment::Each], recognize(tuple((each, opt(boundOperation))))),
-		value(vec![ast::PathSegment::BoundOperation], boundOperation),
-		value(vec![ast::PathSegment::Count], count),
-		value(vec![ast::PathSegment::Ref], _ref),
+		boundOperation_wip,
+		map(count_wip, |s| vec![s]),
+		map(_ref_wip, |s| vec![s]),
 		|i| {
 			let (i, key) = keyPredicate_wip(i, kind)?;
 			let (i, path) = opt(|i| singleNavigation_wip(i, kind))(i)?;
@@ -293,9 +293,9 @@ fn singleNavigation_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> I
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedEntityTypeName)))(input)?;
 	let (input, path) = opt(alt((
 		value(vec![ast::PathSegment::Property], preceded(tag("/"), |i| propertyPath_wip(i, kind))),
-		value(vec![ast::PathSegment::BoundOperation], boundOperation),
-		value(vec![ast::PathSegment::Ref], _ref),
-		value(vec![ast::PathSegment::Value], _value),
+		boundOperation_wip,
+		map(_ref_wip, |s| vec![s]),
+		map(_value_wip, |s| vec![s]),
 	)))(input)?;
 
 	let mut result = vec![];
@@ -335,15 +335,16 @@ fn propertyPath_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResu
 	let (input, path) = match property {
 		Property::Navigation(Navigation{collection: true, ..}) => collectionNavigation_wip(input, kind)?,
 		Property::Navigation(Navigation{collection: false, ..}) => singleNavigation_wip(input, kind)?,
-		Property::Structural(Structural{kind: Type::Complex(_), collection: true, ..}) => value(vec![], complexColPath)(input)?,
-		Property::Structural(Structural{kind: Type::Complex(_), collection: false, ..}) => value(vec![], complexPath)(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(kind::Primitive::Stream), collection: false, ..}) => value(vec![], boundOperation)(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(_), collection: true, ..}) => value(vec![], primitiveColPath)(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(_), collection: false, ..}) => value(vec![], primitivePath)(input)?,
-		Property::Structural(Structural{kind: Type::Enumeration(_), collection: true, ..}) => value(vec![], primitiveColPath)(input)?,
-		Property::Structural(Structural{kind: Type::Enumeration(_), collection: false, ..}) => value(vec![], primitivePath)(input)?,
+		Property::Structural(Structural{kind: Type::Complex(_), collection: true, ..}) => complexColPath_wip(input)?,
+		Property::Structural(Structural{kind: Type::Complex(_), collection: false, ..}) => complexPath_wip(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(kind::Primitive::Stream), ..}) => boundOperation_wip(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(_), collection: true, ..}) => primitiveColPath_wip(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(_), collection: false, ..}) => primitivePath_wip(input)?,
+		Property::Structural(Structural{kind: Type::Enumeration(_), collection: true, ..}) => primitiveColPath_wip(input)?,
+		Property::Structural(Structural{kind: Type::Enumeration(_), collection: false, ..}) => primitivePath_wip(input)?,
 	};
 
+	//FIXME
 	// let result = vec![ast::PathSegment::Property(property)];
 	// if let Some(mut path) = path {
 	// 	result.append(&mut path);
@@ -355,34 +356,94 @@ fn propertyPath_wip<'a>(input: &'a str, kind: &'a schema::kind::Entity) -> IResu
 //*
 //* primitiveColPath = count / boundOperation / ordinalIndex
 named!(primitiveColPath<&str, &str>, call!(alt((count, boundOperation, ordinalIndex))));
+fn primitiveColPath_wip<'a>(input: &'a str) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+	alt((
+		map(count_wip, |c| vec![c]),
+		boundOperation_wip,
+		map(ordinalIndex_wip, |index| vec![index]),
+	))(input)
+}
+
 //*
 //* primitivePath  = value / boundOperation
 named!(primitivePath<&str, &str>, call!(alt((_value, boundOperation))));
+fn primitivePath_wip<'a>(input: &'a str) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+	alt((
+		map(_value_wip, |c| vec![c]),
+		boundOperation_wip
+	))(input)
+}
 //*
 //* complexColPath = ordinalIndex
 //*                / [ "/" qualifiedComplexTypeName ] [ count / boundOperation ]
+//  The ABNF doesn't allow selecting a specific element and then continuing with a complexPath
+//  rule. Is this a mistake?
 named!(complexColPath<&str, &str>, call!(alt((ordinalIndex, recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((count, boundOperation))))))))));
+fn complexColPath_wip<'a>(input: &'a str) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+	alt((
+		map(ordinalIndex_wip, |index| vec![index]),
+		|input| {
+			let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedComplexTypeName)))(input)?;
+			let (input, path) = opt(alt((map(count_wip, |s| vec![s]), boundOperation_wip)))(input)?;
+
+			let mut result = vec![];
+			if let Some(cast) = cast {
+				result.push(cast);
+			}
+			if let Some(mut path) = path {
+				result.append(&mut path);
+			}
+			Ok((input, result))
+		}
+	))(input)
+}
 //*
 //* complexPath    = [ "/" qualifiedComplexTypeName ]
 //*                  [ "/" propertyPath
 //*                  / boundOperation
 //*                  ]
 named!(complexPath<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((recognize(tuple((tag("/"), propertyPath))), boundOperation))))))));
+fn complexPath_wip<'a>(input: &'a str) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedComplexTypeName)))(input)?;
+	let (input, path) = opt(alt((
+		value(vec![ast::PathSegment::Property], preceded(tag("/"), propertyPath)),
+		boundOperation_wip,
+	)))(input)?;
+
+	let mut result = vec![];
+	if let Some(cast) = cast {
+		result.push(cast);
+	}
+	if let Some(mut path) = path {
+		result.append(&mut path);
+	}
+	Ok((input, result))
+}
 //*
 //* filterInPath = '/$filter' EQ parameterAlias
 named!(filterInPath<&str, &str>, call!(recognize(tuple((tag("/$filter"), EQ, parameterAlias)))));
 //*
 //* each  = '/$each'
 named!(each<&str, &str>, call!(tag("/$each")));
+named!(each_wip<&str, ast::PathSegment>, call!(value(ast::PathSegment::Each, tag("/$each"))));
 //* count = '/$count'
 named!(count<&str, &str>, call!(tag("/$count")));
+named!(count_wip<&str, ast::PathSegment>, call!(value(ast::PathSegment::Count, tag("/$count"))));
 //* ref   = '/$ref'
 named!(_ref<&str, &str>, call!(tag("/$ref")));
+named!(_ref_wip<&str, ast::PathSegment>, call!(value(ast::PathSegment::Ref, tag("/$ref"))));
 //* value = '/$value'
 named!(_value<&str, &str>, call!(tag("/$value")));
+named!(_value_wip<&str, ast::PathSegment>, call!(value(ast::PathSegment::Value, tag("/$value"))));
 //*
 //* ordinalIndex = "/" 1*DIGIT
+//  Even though the ABNF encodes only positive integers, the OData spec defines negative ordinal
+//  indices too. See:
+//  http://docs.oasis-open.org/odata/odata/v4.01/cs01/part1-protocol/odata-v4.01-cs01-part1-protocol.html#sec_RequestinganIndividualMemberofanOrde
 named!(ordinalIndex<&str, &str>, call!(recognize(tuple((tag("/"), many1(DIGIT))))));
+fn ordinalIndex_wip(input: &str) -> IResult<&str, ast::PathSegment> {
+	map(preceded(tag("/"), map_res(recognize(tuple((opt(tag("-")), digit1))), |n: &str| n.parse())), ast::PathSegment::OrdinalIndex)(input)
+}
 //*
 //* ; boundOperation segments can only be composed if the type of the previous segment
 //* ; matches the type of the first parameter of the action or function being called.
@@ -405,6 +466,9 @@ named!(boundOperation<&str, &str>, call!(recognize(tuple((tag("/"), alt((boundAc
 								     , recognize(tuple((boundPrimitiveFunctionCall, opt(primitivePath))))
 								     , boundFunctionCallNoParens
 								     )))))));
+fn boundOperation_wip(input: &str) -> IResult<&str, Vec<ast::PathSegment>> {
+	value(vec![], boundOperation)(input)
+}
 //*
 //* actionImportCall = actionImport
 named!(actionImportCall<&str, &str>, call!(recognize(actionImport)));

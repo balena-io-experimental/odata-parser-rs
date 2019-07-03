@@ -45,7 +45,7 @@ pub enum PathSegment<'a> {
 	Property,                   // -> single,collection,complexCollection,complex,primitiveCollection,primitive,boundOperation
 	Ref,                        // -> ()
 	Value,
-	OrdinalIndex,
+	OrdinalIndex(i64),
 }
 
 #[derive(Debug,Clone)]
