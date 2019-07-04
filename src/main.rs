@@ -42,6 +42,20 @@ fn main() {
 
 	user.properties.insert(property.name.clone(), schema::property::Property::Structural(property));
 
+	let property = schema::property::Structural{
+		name: String::from("id"),
+		kind: schema::property::Type::Primitive(schema::kind::Primitive::Int64),
+		collection: false,
+		nullable: false,
+		max_length: 20,
+		unicode: false,
+		precision: 0,
+		scale: 0,
+		srid: 0,
+	};
+
+	user.properties.insert(property.name.clone(), schema::property::Property::Structural(property));
+
 	doc.schema.members.insert(user.name.clone(), schema::SchemaMember::Entity(user.clone()));
 
 	let entity_set = schema::EntitySet{
@@ -59,6 +73,7 @@ fn main() {
 
 	let mut p = parser::Parser::new(&doc);
 	// println!("{:?}", parser::odataRelativeUri("ProductsByComplex(complex=@c)?@c={\"@odata.type\":\"Model.Customer\",\"Name\":\"Value\"}\n"));
-	println!("{:#?}", p.parse("https://example.com/foobar/users/$count\n"));
+	// println!("{:#?}", p.parse("https://example.com/foobar/users/$filter=@foo/$filter=@bar/$count"));
+	println!("{:#?}", p.parse("https://example.com/foobar/users/123"));
 }
 

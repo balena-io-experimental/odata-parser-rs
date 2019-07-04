@@ -3,6 +3,9 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use std::collections::HashMap;
+use std::iter::FromIterator;
+
 use std::str;
 use super::ast;
 use super::schema;
@@ -113,6 +116,7 @@ use nom::branch::*;
 
 pub struct Parser<'a> {
 	document: &'a schema::Document,
+	// bound_vars: RefCell<HashMap<Identifier, (Type, Option<Value>>>,
 }
 
 impl<'a> Parser<'a> {
@@ -250,20 +254,43 @@ named!(collectionNavPath<&str, &str>, call!(alt((recognize(tuple((keyPredicate, 
 					))));
 fn collectionNavPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	alt((
-		value(vec![ast::PathSegment::Filter], recognize(tuple((filterInPath, opt(collectionNavigation))))),
-		value(vec![ast::PathSegment::Each], recognize(tuple((each, opt(boundOperation))))),
-		|i| boundOperation_wip(i, ctx),
-		map(count_wip, |s| vec![s]),
-		map(_ref_wip, |s| vec![s]),
 		|i| {
-			let (i, key) = keyPredicate_wip(i, ctx, kind)?;
-			let (i, path) = opt(|i| singleNavigation_wip(i, ctx, kind))(i)?;
-
-			let mut result = vec![ast::PathSegment::KeyPredicate(key)];
+			let (i, filter) = filterInPath_wip(i)?;
+			let (i, path) = opt(|i| collectionNavigation_wip(i, ctx, kind))(i)?;
+			let mut result = vec![filter];
 			if let Some(mut path) = path {
 				result.append(&mut path);
 			}
 			Ok((i, result))
+		},
+		|i| {
+			let (input, (each, bound_op)) = tuple((each_wip, opt(|i| boundOperation_wip(i, ctx))))(i)?;
+			let mut result = vec![each];
+			if let Some(mut bound_op) = bound_op {
+				result.append(&mut bound_op);
+			}
+
+			Ok((input, result))
+		},
+		|i| boundOperation_wip(i, ctx),
+		map(count_wip, |s| vec![s]),
+		map(_ref_wip, |s| vec![s]),
+		|i| {
+			match &kind.key {
+				Some(key) => {
+					let foo: HashMap<&str, _> = HashMap::from_iter(key.iter().map(|n| (n.as_str(), kind.properties.get(n).expect(n))));
+					let (i, key) = keyPredicate_wip(i, ctx, &foo)?;
+					let (i, path) = opt(|i| singleNavigation_wip(i, ctx, kind))(i)?;
+
+					let mut result = vec![ast::PathSegment::KeyPredicate(key)];
+					if let Some(mut path) = path {
+						result.append(&mut path);
+					}
+					Ok((i, result))
+				},
+				//FIXME find a way to do proper error handling
+				None => Err(nom::Err::Error((i, nom::error::ErrorKind::Alt))),
+			}
 		},
 	))(input)
 }
@@ -271,18 +298,41 @@ fn collectionNavPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::
 //*
 //* keyPredicate     = simpleKey / compoundKey / keyPathSegments
 named!(keyPredicate<&str, &str>, call!(alt((simpleKey, compoundKey, keyPathSegments))));
-fn keyPredicate_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, ast::KeyPredicate> {
-	//FIXME
-	alt((
-		value(ast::KeyPredicate::Simple, simpleKey),
-		value(ast::KeyPredicate::Compound, compoundKey),
-		value(ast::KeyPredicate::KeyPathSegment, keyPathSegments),
-	))(input)
+fn keyPredicate_wip<'a>(input: &'a str, ctx: &Parser, key: &HashMap<&str, &schema::property::Property>) -> IResult<&'a str, ast::KeyPredicate<'a>> {
+	match key.len() {
+		0 => panic!(),
+		1 => {
+			let (_, first_key) = key.iter().next().unwrap();
+			alt((
+				move |i| simpleKey_wip(i, ctx, *first_key),
+				|i| compoundKey_wip(i, ctx, &key),
+				|i| keyPathSegments_wip(i, ctx, &key),
+			))(input)
+		}
+		_ => {
+			alt((
+				|i| compoundKey_wip(i, ctx, &key),
+				|i| keyPathSegments_wip(i, ctx, &key),
+			))(input)
+		}
+	}
 }
 //* simpleKey        = OPEN ( parameterAlias / keyPropertyValue ) CLOSE
 named!(simpleKey<&str, &str>, call!(recognize(tuple((OPEN, alt((parameterAlias, keyPropertyValue)), CLOSE)))));
+fn simpleKey_wip<'a>(input: &'a str, ctx: &Parser, key: &schema::property::Property) -> IResult<&'a str, ast::KeyPredicate<'a>> {
+	let key = alt((
+		map(|i| keyPropertyValue(i), ast::KeyValue::Value),
+		map(parameterAlias_wip, ast::KeyValue::ParameterAlias),
+	));
+
+	map(delimited(OPEN, key, CLOSE), |k| ast::KeyPredicate{values: vec![k]})(input)
+}
 //* compoundKey      = OPEN keyValuePair *( COMMA keyValuePair ) CLOSE
 named!(compoundKey<&str, &str>, call!(recognize(tuple((OPEN, keyValuePair, many0(tuple((COMMA, keyValuePair))), CLOSE)))));
+fn compoundKey_wip<'a>(input: &'a str, ctx: &Parser, key: &HashMap<&str, &schema::property::Property>) -> IResult<&'a str, ast::KeyPredicate<'a>> {
+	map(delimited(OPEN, separated_nonempty_list(COMMA, map(keyValuePair, ast::KeyValue::Value)), CLOSE), |v| ast::KeyPredicate{values: v})(input)
+}
+
 //* keyValuePair     = ( primitiveKeyProperty / keyPropertyAlias  ) EQ ( parameterAlias / keyPropertyValue )
 named!(keyValuePair<&str, &str>, call!(recognize(tuple((alt((primitiveKeyProperty, keyPropertyAlias)), EQ, alt((parameterAlias, keyPropertyValue)))))));
 //* keyPropertyValue = primitiveLiteral
@@ -291,6 +341,9 @@ named!(keyPropertyValue<&str, &str>, call!(recognize(primitiveLiteral)));
 named!(keyPropertyAlias<&str, &str>, call!(recognize(odataIdentifier)));
 //* keyPathSegments  = 1*( "/" keyPathLiteral )
 named!(keyPathSegments<&str, &str>, call!(recognize(many1(tuple((tag("/"), keyPathLiteral))))));
+fn keyPathSegments_wip<'a>(input: &'a str, ctx: &Parser, key: &HashMap<&str, &schema::property::Property>) -> IResult<&'a str, ast::KeyPredicate<'a>> {
+	map(many_m_n(key.len(), key.len(), preceded(tag("/"), map(keyPathLiteral, ast::KeyValue::Value))), |v| ast::KeyPredicate{values: v})(input)
+}
 //* keyPathLiteral   = *pchar
 named!(keyPathLiteral<&str, &str>, call!(recognize(many0(pchar))));
 //*
@@ -439,6 +492,7 @@ fn complexPath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<
 //*
 //* filterInPath = '/$filter' EQ parameterAlias
 named!(filterInPath<&str, &str>, call!(recognize(tuple((tag("/$filter"), EQ, parameterAlias)))));
+named!(filterInPath_wip<&str, ast::PathSegment>, call!(map(preceded(tuple((tag("/$filter"), EQ)), parameterAlias_wip), |p| ast::PathSegment::Filter(p))));
 //*
 //* each  = '/$each'
 named!(each<&str, &str>, call!(tag("/$each")));
@@ -561,7 +615,8 @@ named!(functionParameter<&str, &str>, call!(recognize(tuple((parameterName, EQ, 
 //* parameterName      = odataIdentifier
 named!(parameterName<&str, &str>, call!(recognize(odataIdentifier)));
 //* parameterAlias     = AT odataIdentifier
-named!(parameterAlias<&str, &str>, call!(recognize(tuple((AT, odataIdentifier)))));
+named!(parameterAlias<&str, &str>, call!(preceded(AT, odataIdentifier)));
+named!(parameterAlias_wip<&str, ast::ParameterAlias>, call!(map(preceded(AT, odataIdentifier), |name| ast::ParameterAlias{name})));
 //*
 //* crossjoin = '$crossjoin' OPEN
 //*             entitySetName *( COMMA entitySetName )

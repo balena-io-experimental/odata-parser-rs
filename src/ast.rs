@@ -40,8 +40,8 @@ pub enum PathSegment<'a> {
 	BoundOperation,             // -> ()
 	Count,                      // -> ()
 	Each,                       // -> boundOperation
-	Filter,                     // -> collectionNavigation
-	KeyPredicate(KeyPredicate), // -> singleNavigation
+	Filter(ParameterAlias<'a>),     // -> collectionNavigation
+	KeyPredicate(KeyPredicate<'a>), // -> singleNavigation
 	Property,                   // -> single,collection,complexCollection,complex,primitiveCollection,primitive,boundOperation
 	Ref,                        // -> ()
 	Value,
@@ -49,10 +49,25 @@ pub enum PathSegment<'a> {
 }
 
 #[derive(Debug,Clone)]
-pub enum KeyPredicate {
-	Simple,
-	Compound,
-	KeyPathSegment,
+pub struct KeyPredicate<'a> {
+	pub values: Vec<KeyValue<'a>>,
+}
+
+#[derive(Debug,Clone)]
+pub enum KeyValue<'a> {
+	ParameterAlias(ParameterAlias<'a>),
+	Value(&'a str),
+}
+
+#[derive(Debug,Clone)]
+pub struct PrimitiveValue<'a> {
+	kind: schema::kind::Primitive,
+	value: &'a str,
+}
+
+#[derive(Debug,Clone)]
+pub struct ParameterAlias<'a> {
+	pub name: &'a str,
 }
 
 #[derive(Debug,Clone)]
