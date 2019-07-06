@@ -30,27 +30,33 @@ pub struct ResourcePath<'a> {
 
 #[derive(Debug,Clone)]
 pub enum PathSegment<'a> {
-	EntitySet(&'a schema::EntitySet),  // -> collectionNavigation
-	Singleton,                  // -> singleNavigation
-	Action,                     // -> ()
-	Function,                   // -> collection,single,complexCollection,complex,primitiveCollection,primitive,() navigation
-	Crossjoin,                  // -> ()
-	All,                        // -> ()
+	EntitySet(&'a schema::EntitySet),             // -> collectionNavigation
+	Singleton,                                    // -> singleNavigation
+	Action,                                       // -> ()
+	Function,                                     // -> collection,single,complexCollection,complex,primitiveCollection,primitive,() navigation
+	Crossjoin,                                    // -> ()
+	All,                                          // -> ()
 	Cast,
-	BoundOperation,             // -> ()
-	Count,                      // -> ()
-	Each,                       // -> boundOperation
-	Filter(ParameterAlias<'a>),     // -> collectionNavigation
-	KeyPredicate(KeyPredicate<'a>), // -> singleNavigation
-	Property,                   // -> single,collection,complexCollection,complex,primitiveCollection,primitive,boundOperation
-	Ref,                        // -> ()
+	BoundOperation,                               // -> ()
+	Count,                                        // -> ()
+	Each,                                         // -> boundOperation
+	Filter(ParameterAlias<'a>),                   // -> collectionNavigation
+	KeyPredicate(KeyPredicate<'a>),               // -> singleNavigation
+	Property(&'a schema::property::Property),     // -> single,collection,complexCollection,complex,primitiveCollection,primitive,boundOperation
+	Ref,                                          // -> ()
 	Value,
 	OrdinalIndex(i64),
 }
 
 #[derive(Debug,Clone)]
 pub struct KeyPredicate<'a> {
-	pub values: Vec<KeyValue<'a>>,
+	pub values: Vec<(KeyProperty<'a>)>,
+}
+
+#[derive(Debug,Clone)]
+pub struct KeyProperty<'a> {
+	pub property: &'a schema::property::Property,
+	pub value: KeyValue<'a>,
 }
 
 #[derive(Debug,Clone)]

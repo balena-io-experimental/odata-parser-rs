@@ -44,7 +44,7 @@ type Reference = String;
 
 type Namespace = String;
 
-type Identifier = String;
+pub type Identifier = String;
 
 #[derive(Debug,Eq,PartialEq)]
 pub struct Schema {
@@ -79,12 +79,26 @@ impl Schema {
 		self.entity_container_name = Some(member.name.clone());
 		self.members.insert(member.name.clone(), SchemaMember::EntityContainer(member));
 	}
+
+	pub fn get_entity_type(&self, name: &str) -> &kind::Entity {
+		match self.members.get(name).unwrap() {
+			SchemaMember::Entity(e) => e,
+			_ => panic!("not an entity type: {}", name),
+		}
+	}
+
+	pub fn get_complex_type(&self, name: &str) -> &kind::Complex {
+		match self.members.get(name).unwrap() {
+			SchemaMember::Complex(e) => e,
+			_ => panic!("not a complex type: {}", name),
+		}
+	}
 }
 
 #[derive(Debug,Eq,PartialEq)]
 pub enum SchemaMember {
 	Entity(kind::Entity),
-	Complex,
+	Complex(kind::Complex),
 	Enumeration,
 	TypeDefinition,
 	Action,
@@ -223,7 +237,7 @@ pub mod property {
 	#[derive(Clone,Debug,Eq,PartialEq)]
 	pub struct Navigation {
 		pub name: Identifier,
-		pub kind: Identifier,
+		pub kind: super::kind::Entity,
 		pub collection: bool,
 		pub nullable: bool,
 		pub partner: Identifier,

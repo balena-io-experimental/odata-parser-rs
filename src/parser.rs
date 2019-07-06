@@ -278,8 +278,7 @@ fn collectionNavPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::
 		|i| {
 			match &kind.key {
 				Some(key) => {
-					let foo: HashMap<&str, _> = HashMap::from_iter(key.iter().map(|n| (n.as_str(), kind.properties.get(n).expect(n))));
-					let (i, key) = keyPredicate_wip(i, ctx, &foo)?;
+					let (i, key) = keyPredicate_wip(i, ctx, &kind.properties, key)?;
 					let (i, path) = opt(|i| singleNavigation_wip(i, ctx, kind))(i)?;
 
 					let mut result = vec![ast::PathSegment::KeyPredicate(key)];
@@ -298,54 +297,74 @@ fn collectionNavPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::
 //*
 //* keyPredicate     = simpleKey / compoundKey / keyPathSegments
 named!(keyPredicate<&str, &str>, call!(alt((simpleKey, compoundKey, keyPathSegments))));
-fn keyPredicate_wip<'a>(input: &'a str, ctx: &Parser, key: &HashMap<&str, &schema::property::Property>) -> IResult<&'a str, ast::KeyPredicate<'a>> {
+fn keyPredicate_wip<'a>(input: &'a str, ctx: &Parser, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<&'a str, ast::KeyPredicate<'a>> {
 	match key.len() {
 		0 => panic!(),
 		1 => {
-			let (_, first_key) = key.iter().next().unwrap();
 			alt((
-				move |i| simpleKey_wip(i, ctx, *first_key),
-				|i| compoundKey_wip(i, ctx, &key),
-				|i| keyPathSegments_wip(i, ctx, &key),
+				|i| simpleKey_wip(i, ctx, props.get(&key[0]).unwrap()),
+				|i| compoundKey_wip(i, ctx, props, key),
+				|i| keyPathSegments_wip(i, ctx, props, key),
 			))(input)
 		}
 		_ => {
 			alt((
-				|i| compoundKey_wip(i, ctx, &key),
-				|i| keyPathSegments_wip(i, ctx, &key),
+				|i| compoundKey_wip(i, ctx, props, key),
+				|i| keyPathSegments_wip(i, ctx, props, key),
 			))(input)
 		}
 	}
 }
 //* simpleKey        = OPEN ( parameterAlias / keyPropertyValue ) CLOSE
 named!(simpleKey<&str, &str>, call!(recognize(tuple((OPEN, alt((parameterAlias, keyPropertyValue)), CLOSE)))));
-fn simpleKey_wip<'a>(input: &'a str, ctx: &Parser, key: &schema::property::Property) -> IResult<&'a str, ast::KeyPredicate<'a>> {
-	let key = alt((
+fn simpleKey_wip<'a>(input: &'a str, ctx: &Parser, key_property: &'a schema::property::Property) -> IResult<&'a str, ast::KeyPredicate<'a>> {
+	let value = alt((
 		map(|i| keyPropertyValue(i), ast::KeyValue::Value),
 		map(parameterAlias_wip, ast::KeyValue::ParameterAlias),
 	));
 
-	map(delimited(OPEN, key, CLOSE), |k| ast::KeyPredicate{values: vec![k]})(input)
+	map(delimited(OPEN, value, CLOSE), |k| ast::KeyPredicate{values: vec![ast::KeyProperty{property: key_property, value: k}]})(input)
 }
 //* compoundKey      = OPEN keyValuePair *( COMMA keyValuePair ) CLOSE
 named!(compoundKey<&str, &str>, call!(recognize(tuple((OPEN, keyValuePair, many0(tuple((COMMA, keyValuePair))), CLOSE)))));
-fn compoundKey_wip<'a>(input: &'a str, ctx: &Parser, key: &HashMap<&str, &schema::property::Property>) -> IResult<&'a str, ast::KeyPredicate<'a>> {
-	map(delimited(OPEN, separated_nonempty_list(COMMA, map(keyValuePair, ast::KeyValue::Value)), CLOSE), |v| ast::KeyPredicate{values: v})(input)
+fn compoundKey_wip<'a>(input: &'a str, ctx: &Parser, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<&'a str, ast::KeyPredicate<'a>> {
+	map(delimited(OPEN, separated_nonempty_list(COMMA, |i| keyValuePair_wip(i, ctx, props, key)), CLOSE), |v| ast::KeyPredicate{values: v})(input)
 }
 
 //* keyValuePair     = ( primitiveKeyProperty / keyPropertyAlias  ) EQ ( parameterAlias / keyPropertyValue )
 named!(keyValuePair<&str, &str>, call!(recognize(tuple((alt((primitiveKeyProperty, keyPropertyAlias)), EQ, alt((parameterAlias, keyPropertyValue)))))));
+fn keyValuePair_wip<'a>(input: &'a str, ctx: &Parser, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<&'a str, ast::KeyProperty<'a>> {
+	let (input, property) = map_opt(alt((primitiveKeyProperty, keyPropertyAlias)), |n| props.get(n))(input)?;
+	let (input, value) = preceded(EQ, alt((map(parameterAlias_wip, ast::KeyValue::ParameterAlias), |i| keyPropertyValue_wip(i, ctx, property))))(input)?;
+
+	Ok((input, ast::KeyProperty{property, value}))
+}
 //* keyPropertyValue = primitiveLiteral
 named!(keyPropertyValue<&str, &str>, call!(recognize(primitiveLiteral)));
+fn keyPropertyValue_wip<'a>(input: &'a str, ctx: &Parser, property: &'a schema::property::Property) -> IResult<&'a str, ast::KeyValue<'a>> {
+	map(primitiveLiteral, ast::KeyValue::Value)(input)
+}
 //* keyPropertyAlias = odataIdentifier
 named!(keyPropertyAlias<&str, &str>, call!(recognize(odataIdentifier)));
 //* keyPathSegments  = 1*( "/" keyPathLiteral )
 named!(keyPathSegments<&str, &str>, call!(recognize(many1(tuple((tag("/"), keyPathLiteral))))));
-fn keyPathSegments_wip<'a>(input: &'a str, ctx: &Parser, key: &HashMap<&str, &schema::property::Property>) -> IResult<&'a str, ast::KeyPredicate<'a>> {
-	map(many_m_n(key.len(), key.len(), preceded(tag("/"), map(keyPathLiteral, ast::KeyValue::Value))), |v| ast::KeyPredicate{values: v})(input)
+fn keyPathSegments_wip<'a>(input: &'a str, ctx: &Parser, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<&'a str, ast::KeyPredicate<'a>> {
+	let mut result = vec![];
+
+	for name in key {
+		let (input, value) = preceded(tag("/"), |i| keyPathLiteral_wip(i, ctx, props.get(name).unwrap()))(input)?;
+		result.push(value);
+	}
+
+	Ok((input, ast::KeyPredicate{values: result}))
 }
 //* keyPathLiteral   = *pchar
+// FIXME This rule is overly generic. It should be matching the primitive value that the particular
+// property has
 named!(keyPathLiteral<&str, &str>, call!(recognize(many0(pchar))));
+fn keyPathLiteral_wip<'a>(input: &'a str, ctx: &Parser, property: &'a schema::property::Property) -> IResult<&'a str, ast::KeyProperty<'a>> {
+	map(recognize(many0(pchar)), |n| ast::KeyProperty{property, value: ast::KeyValue::Value(n)})(input)
+}
 //*
 //* singleNavigation = [ "/" qualifiedEntityTypeName ]
 //*                    [ "/" propertyPath
@@ -362,7 +381,7 @@ fn singleNavigation_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::k
 	//FIXME
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedEntityTypeName)))(input)?;
 	let (input, path) = opt(alt((
-		value(vec![ast::PathSegment::Property], preceded(tag("/"), |i| propertyPath_wip(i, ctx, kind))),
+		preceded(tag("/"), |i| propertyPath_wip(i, ctx, &kind.properties)),
 		|i| boundOperation_wip(i, ctx),
 		map(_ref_wip, |s| vec![s]),
 		map(_value_wip, |s| vec![s]),
@@ -394,33 +413,30 @@ named!(propertyPath<&str, &str>, call!(recognize(alt((tuple((entityColNavigation
 						 , tuple((primitiveProperty, opt(primitivePath)))
 						 , tuple((streamProperty, opt(boundOperation)))
 						 )))));
-fn propertyPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn propertyPath_wip<'a>(input: &'a str, ctx: &'a Parser, properties: &'a HashMap<schema::Identifier, schema::property::Property>) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	use schema::kind;
 	use schema::property::*;
 
-	let (input, ident) = odataIdentifier(input)?;
-
-	let property = kind.properties.get(ident).unwrap();//FIXME
+	let (input, property) = map_opt(odataIdentifier, |name| properties.get(name))(input)?;
 
 	let (input, path) = match property {
-		Property::Navigation(Navigation{collection: true, ..}) => collectionNavigation_wip(input, ctx, kind)?,
-		Property::Navigation(Navigation{collection: false, ..}) => singleNavigation_wip(input, ctx, kind)?,
-		Property::Structural(Structural{kind: Type::Complex(_), collection: true, ..}) => complexColPath_wip(input, ctx)?,
-		Property::Structural(Structural{kind: Type::Complex(_), collection: false, ..}) => complexPath_wip(input, ctx)?,
-		Property::Structural(Structural{kind: Type::Primitive(kind::Primitive::Stream), ..}) => boundOperation_wip(input, ctx)?,
-		Property::Structural(Structural{kind: Type::Primitive(_), collection: true, ..}) => primitiveColPath_wip(input, ctx)?,
-		Property::Structural(Structural{kind: Type::Primitive(_), collection: false, ..}) => primitivePath_wip(input, ctx)?,
-		Property::Structural(Structural{kind: Type::Enumeration(_), collection: true, ..}) => primitiveColPath_wip(input, ctx)?,
-		Property::Structural(Structural{kind: Type::Enumeration(_), collection: false, ..}) => primitivePath_wip(input, ctx)?,
+		Property::Navigation(Navigation{kind, collection: true, ..}) => opt(|i| collectionNavigation_wip(i, ctx, kind))(input)?,
+		Property::Navigation(Navigation{kind, collection: false, ..}) => opt(|i| singleNavigation_wip(i, ctx, kind))(input)?,
+		Property::Structural(Structural{kind: Type::Complex(kind), collection: true, ..}) => opt(|i| complexColPath_wip(i, ctx, kind))(input)?,
+		Property::Structural(Structural{kind: Type::Complex(kind), collection: false, ..}) => opt(|i| complexPath_wip(i, ctx, kind))(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(kind::Primitive::Stream), ..}) => opt(|i| boundOperation_wip(i, ctx))(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i, ctx))(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(_), collection: false, ..}) => opt(|i| primitivePath_wip(i, ctx))(input)?,
+		Property::Structural(Structural{kind: Type::Enumeration(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i, ctx))(input)?,
+		Property::Structural(Structural{kind: Type::Enumeration(_), collection: false, ..}) => opt(|i| primitivePath_wip(i, ctx))(input)?,
 	};
 
-	//FIXME
-	// let result = vec![ast::PathSegment::Property(property)];
-	// if let Some(mut path) = path {
-	// 	result.append(&mut path);
-	// }
+	let mut result = vec![ast::PathSegment::Property(property)];
+	if let Some(mut path) = path {
+		result.append(&mut path);
+	}
 
-	Ok((input, vec![]))
+	Ok((input, result))
 }
 
 //*
@@ -449,7 +465,7 @@ fn primitivePath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Ve
 //  The ABNF doesn't allow selecting a specific element and then continuing with a complexPath
 //  rule. Is this a mistake?
 named!(complexColPath<&str, &str>, call!(alt((ordinalIndex, recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((count, boundOperation))))))))));
-fn complexColPath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn complexColPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Complex) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	alt((
 		map(|i| ordinalIndex_wip(i, ctx), |index| vec![index]),
 		|input| {
@@ -473,10 +489,10 @@ fn complexColPath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, V
 //*                  / boundOperation
 //*                  ]
 named!(complexPath<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((recognize(tuple((tag("/"), propertyPath))), boundOperation))))))));
-fn complexPath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn complexPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Complex) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedComplexTypeName)))(input)?;
 	let (input, path) = opt(alt((
-		value(vec![ast::PathSegment::Property], preceded(tag("/"), propertyPath)),
+		preceded(tag("/"), |i| propertyPath_wip(i, ctx, &kind.properties)),
 		|i| boundOperation_wip(i, ctx),
 	)))(input)?;
 
@@ -538,6 +554,7 @@ named!(boundOperation<&str, &str>, call!(recognize(tuple((tag("/"), alt((boundAc
 								     , boundFunctionCallNoParens
 								     )))))));
 fn boundOperation_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+	// FIXME
 	value(vec![], boundOperation)(input)
 }
 //*
