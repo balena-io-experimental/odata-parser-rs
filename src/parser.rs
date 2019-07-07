@@ -135,7 +135,7 @@ pub fn odataUri<'a>(input: &'a str, ctx: &'a Parser, document: &'a schema::Docum
 	do_parse!(input,
 		service_root: call!(serviceRoot, ctx, &document.service_root) >>
 		relative_uri: call!(opt(|input| odataRelativeUri(input, ctx, &document.schema))) >>
-		(ast::ODataURI{service_root, relative_uri: relative_uri.unwrap_or(ast::RelativeURI::None)})
+		(ast::ODataURI{service_root, relative_uri})
 	)
 }
 //*
@@ -242,7 +242,7 @@ fn collectionNavigation_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schem
 //*                      / count
 //*                      / ref
 //
-//  While in the ABNF the keyPredicate case appears first, we in fact have to do it last according
+//  errata: While in the ABNF the keyPredicate case appears first, we in fact have to do it last according
 //  to the precence rules defined here:
 //  http://docs.oasis-open.org/odata/odata/v4.01/cs01/part2-url-conventions/odata-v4.01-cs01-part2-url-conventions.html#sec_KeyasSegmentConvention
 named!(collectionNavPath<&str, &str>, call!(alt((recognize(tuple((keyPredicate, opt(singleNavigation))))
@@ -462,7 +462,7 @@ fn primitivePath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Ve
 //*
 //* complexColPath = ordinalIndex
 //*                / [ "/" qualifiedComplexTypeName ] [ count / boundOperation ]
-//  The ABNF doesn't allow selecting a specific element and then continuing with a complexPath
+//  errata: The ABNF doesn't allow selecting a specific element and then continuing with a complexPath
 //  rule. Is this a mistake?
 named!(complexColPath<&str, &str>, call!(alt((ordinalIndex, recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((count, boundOperation))))))))));
 fn complexColPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Complex) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
@@ -524,7 +524,7 @@ named!(_value<&str, &str>, call!(tag("/$value")));
 named!(_value_wip<&str, ast::PathSegment>, call!(value(ast::PathSegment::Value, tag("/$value"))));
 //*
 //* ordinalIndex = "/" 1*DIGIT
-//  Even though the ABNF encodes only positive integers, the OData spec defines negative ordinal
+//  errata: Even though the ABNF encodes only positive integers, the OData spec defines negative ordinal
 //  indices too. See:
 //  http://docs.oasis-open.org/odata/odata/v4.01/cs01/part1-protocol/odata-v4.01-cs01-part1-protocol.html#sec_RequestinganIndividualMemberofanOrde
 named!(ordinalIndex<&str, &str>, call!(recognize(tuple((tag("/"), many1(DIGIT))))));
@@ -791,6 +791,7 @@ named!(index<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$index"), tag
 //*          / 1*pchar "/" 1*pchar ; <a data service specific value indicating a
 //*          )                     ; format specific to the specific data service> or
 //*                                ; <An IANA-defined [IANA-MMT] content type>
+// errata: pchar includes special characters like & and =. It should probably be something like qchar_no_AMP_EQ
 named!(format_wip<&str, ast::QueryOption>, call!(preceded(
 					     tuple((opt(tag("$")), tag_no_case("format"), EQ)),
 					     map(
@@ -1945,6 +1946,7 @@ named!(int32Value<&str, &str>, call!(recognize(tuple((opt(SIGN), many_m_n(1, 10,
 named!(int64Value<&str, &str>, call!(recognize(tuple((opt(SIGN), many_m_n(1, 19, DIGIT))))));
 //*
 //* string           = SQUOTE *( SQUOTE-in-string / pchar-no-SQUOTE ) SQUOTE
+// errata: pchar-no-SQUOTE includes special characters like &, =, and $. Those should be encoded
 named!(string<&str, &str>, call!(recognize(tuple((SQUOTE, many0(alt((recognize(SQUOTE_in_string), recognize(pchar_no_SQUOTE)))), SQUOTE)))));
 //* SQUOTE-in-string = SQUOTE SQUOTE ; two consecutive single quotes represent one within a string literal
 named!(SQUOTE_in_string<&str, &str>, call!(recognize(tuple((SQUOTE, SQUOTE)))));
