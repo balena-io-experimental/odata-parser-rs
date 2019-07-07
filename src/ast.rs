@@ -6,7 +6,7 @@ use super::schema;
 #[derive(Debug,Clone)]
 pub struct ODataURI<'a> {
 	pub service_root: &'a str,
-	pub relative_uri: RelativeURI<'a>,
+	pub relative_uri: Option<RelativeURI<'a>>,
 }
 
 #[derive(Debug,Clone)]
@@ -16,7 +16,6 @@ pub struct ServiceRoot<'a> {
 
 #[derive(Debug,Clone)]
 pub enum RelativeURI<'a> {
-	None,
 	Batch(Option<Vec<QueryOption<'a>>>),
 	Entity,
 	Metadata,
