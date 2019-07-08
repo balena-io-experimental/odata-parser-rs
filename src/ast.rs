@@ -25,6 +25,7 @@ pub enum RelativeURI<'a> {
 #[derive(Debug,Clone)]
 pub struct ResourcePath<'a> {
 	pub segments: Vec<PathSegment<'a>>,
+	pub options: Option<Vec<QueryOption<'a>>>,
 }
 
 #[derive(Debug,Clone)]
@@ -85,6 +86,22 @@ pub enum FormatKind<'a> {
 
 #[derive(Debug,Clone)]
 pub enum QueryOption<'a> {
+	Compute,
+	DeltaToken,
+	Expand,
+	Filter,
+	Id,
+	InlineCount,
+	OrderBy,
+	SchemaVersion,
+	Search,
+	Select,
+	Skip,
+	SkipToken,
+	Top,
+	Index,
+	Alias,
+	Name,
 	Format(FormatKind<'a>),
 	Custom(&'a str),
 }

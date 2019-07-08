@@ -162,9 +162,9 @@ fn odataRelativeUri<'a>(input: &'a str, ctx: &'a Parser, schema: &'a schema::Sch
 		, value(ast::RelativeURI::Metadata, tuple((tag("$metadata"), opt(tuple((tag("?"), metadataOptions))), opt(context))))
 		, |input: &'a str| {
 			do_parse!(input,
-				resource_path: call!(resourcePath, ctx, schema.get_entity_container()) >>
-				options: call!(opt(preceded(tag("?"), queryOptions))) >>
-				(ast::RelativeURI::Resource(resource_path))
+				segments: call!(resourcePath, ctx, schema.get_entity_container()) >>
+				options: call!(opt(preceded(tag("?"), |i| queryOptions_wip(i, ctx)))) >>
+				(ast::RelativeURI::Resource(ast::ResourcePath{segments, options}))
 			)
 		}
 	))(input)
@@ -188,32 +188,30 @@ fn odataRelativeUri<'a>(input: &'a str, ctx: &'a Parser, schema: &'a schema::Sch
 //*              / functionImportCallNoParens
 //*              / crossjoin
 //*              / '$all'                         [ "/" qualifiedEntityTypeName ]
-fn resourcePath<'a>(input: &'a str, ctx: &'a Parser, entity_container: &'a schema::EntityContainer) -> IResult<&'a str, ast::ResourcePath<'a>> {
-	map(
-		alt((
-			|i: &'a str| {
-				let (i, entity_set) = entitySetName_wip(i, ctx, entity_container)?;
-				let (i, options) = opt(|i: &'a str| collectionNavigation_wip(i, ctx, &entity_set.kind))(i)?;
+fn resourcePath<'a>(input: &'a str, ctx: &'a Parser, entity_container: &'a schema::EntityContainer) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+	alt((
+		|i: &'a str| {
+			let (i, entity_set) = entitySetName_wip(i, ctx, entity_container)?;
+			let (i, options) = opt(|i: &'a str| collectionNavigation_wip(i, ctx, &entity_set.kind))(i)?;
 
-				let mut path = vec![ast::PathSegment::EntitySet(entity_set)];
-				if let Some(mut options) = options {
-					path.append(&mut options);
-				}
-				Ok((i, path))
+			let mut path = vec![ast::PathSegment::EntitySet(entity_set)];
+			if let Some(mut options) = options {
+				path.append(&mut options);
 			}
-			, value(vec![ast::PathSegment::Singleton], recognize(tuple((singletonEntity, opt(singleNavigation)))))
-			, value(vec![ast::PathSegment::Action], actionImportCall)
-			, value(vec![ast::PathSegment::Function], recognize(tuple((entityColFunctionImportCall, opt(collectionNavigation)))))
-			, value(vec![ast::PathSegment::Function], recognize(tuple((entityFunctionImportCall, opt(singleNavigation)))))
-			, value(vec![ast::PathSegment::Function], recognize(tuple((complexColFunctionImportCall, opt(complexColPath)))))
-			, value(vec![ast::PathSegment::Function], recognize(tuple((complexFunctionImportCall, opt(complexPath)))))
-			, value(vec![ast::PathSegment::Function], recognize(tuple((primitiveColFunctionImportCall, opt(primitiveColPath)))))
-			, value(vec![ast::PathSegment::Function], recognize(tuple((primitiveFunctionImportCall, opt(primitivePath)))))
-			, value(vec![ast::PathSegment::Function], functionImportCallNoParens)
-			, value(vec![ast::PathSegment::Crossjoin], crossjoin)
-			, value(vec![ast::PathSegment::All], recognize(tuple((tag("$all"), opt(tuple((tag("/"), qualifiedEntityTypeName)))))))
-		)), |segments| ast::ResourcePath{segments}
-	)(input)
+			Ok((i, path))
+		}
+		, value(vec![ast::PathSegment::Singleton], recognize(tuple((singletonEntity, opt(singleNavigation)))))
+		, value(vec![ast::PathSegment::Action], actionImportCall)
+		, value(vec![ast::PathSegment::Function], recognize(tuple((entityColFunctionImportCall, opt(collectionNavigation)))))
+		, value(vec![ast::PathSegment::Function], recognize(tuple((entityFunctionImportCall, opt(singleNavigation)))))
+		, value(vec![ast::PathSegment::Function], recognize(tuple((complexColFunctionImportCall, opt(complexColPath)))))
+		, value(vec![ast::PathSegment::Function], recognize(tuple((complexFunctionImportCall, opt(complexPath)))))
+		, value(vec![ast::PathSegment::Function], recognize(tuple((primitiveColFunctionImportCall, opt(primitiveColPath)))))
+		, value(vec![ast::PathSegment::Function], recognize(tuple((primitiveFunctionImportCall, opt(primitivePath)))))
+		, value(vec![ast::PathSegment::Function], functionImportCallNoParens)
+		, value(vec![ast::PathSegment::Crossjoin], crossjoin)
+		, value(vec![ast::PathSegment::All], recognize(tuple((tag("$all"), opt(tuple((tag("/"), qualifiedEntityTypeName)))))))
+	))(input)
 }
 
 //*
@@ -647,11 +645,22 @@ named!(crossjoin<&str, &str>, call!(recognize(tuple((tag("$crossjoin"), OPEN, en
 //*
 //* queryOptions = queryOption *( "&" queryOption )
 named!(queryOptions<&str, &str>, call!(recognize(tuple((queryOption, many0(tuple((tag("&"), queryOption))))))));
+fn queryOptions_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, Vec<ast::QueryOption<'a>>> {
+	separated_nonempty_list(tag("&"), |i| queryOption_wip(i, ctx))(input)
+}
 //* queryOption  = systemQueryOption
 //*              / aliasAndValue
 //*              / nameAndValue
 //*              / customQueryOption
 named!(queryOption<&str, &str>, call!(alt((systemQueryOption, aliasAndValue, nameAndValue, customQueryOption))));
+fn queryOption_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::QueryOption<'a>> {
+	alt((
+		|i| systemQueryOption_wip(i, ctx),
+		value(ast::QueryOption::Alias, aliasAndValue),
+		value(ast::QueryOption::Name, nameAndValue),
+		customQueryOption_wip,
+	))(input)
+}
 //*
 //* batchOptions = batchOption *( "&" batchOption )
 named!(batchOptions<&str, Vec<ast::QueryOption>>, call!(separated_nonempty_list(tag("&"), batchOption)));
@@ -710,6 +719,26 @@ named!(systemQueryOption<&str, &str>, call!(alt((compute
 					   , skiptoken
 					   , top
 					   , index))));
+fn systemQueryOption_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::QueryOption<'a>> {
+	alt((
+		value(ast::QueryOption::Compute, compute),
+		value(ast::QueryOption::DeltaToken, deltatoken),
+		value(ast::QueryOption::Expand, expand),
+		value(ast::QueryOption::Filter, filter),
+		format_wip,
+		value(ast::QueryOption::Id, id),
+		value(ast::QueryOption::InlineCount, inlinecount),
+		value(ast::QueryOption::OrderBy, orderby),
+		value(ast::QueryOption::SchemaVersion, schemaversion),
+		value(ast::QueryOption::Search, search),
+		value(ast::QueryOption::Select, select),
+		value(ast::QueryOption::Skip, skip),
+		value(ast::QueryOption::SkipToken, skiptoken),
+		value(ast::QueryOption::Top, top),
+		value(ast::QueryOption::Index, index),
+	))(input)
+}
+
 //*
 //* compute          = ( "$compute" / "compute" ) EQ computeItem *( COMMA computeItem )
 named!(compute<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$compute"), tag_no_case("compute"))), EQ, computeItem, many0(tuple((COMMA, computeItem))))))));
