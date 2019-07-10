@@ -346,11 +346,13 @@ fn keyPropertyValue_wip<'a>(input: &'a str, ctx: &Parser, property: &'a schema::
 named!(keyPropertyAlias<&str, &str>, call!(recognize(odataIdentifier)));
 //* keyPathSegments  = 1*( "/" keyPathLiteral )
 named!(keyPathSegments<&str, &str>, call!(recognize(many1(tuple((tag("/"), keyPathLiteral))))));
-fn keyPathSegments_wip<'a>(input: &'a str, ctx: &Parser, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<&'a str, ast::KeyPredicate<'a>> {
+fn keyPathSegments_wip<'a>(mut input: &'a str, ctx: &Parser, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<&'a str, ast::KeyPredicate<'a>> {
 	let mut result = vec![];
 
 	for name in key {
-		let (input, value) = preceded(tag("/"), |i| keyPathLiteral_wip(i, ctx, props.get(name).unwrap()))(input)?;
+		let (i, value) = preceded(tag("/"), |i| keyPathLiteral_wip(i, ctx, props.get(name).unwrap()))(input)?;
+		input = i;
+
 		result.push(value);
 	}
 
