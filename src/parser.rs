@@ -724,7 +724,7 @@ fn systemQueryOption_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, a
 		value(ast::QueryOption::Compute, compute),
 		value(ast::QueryOption::DeltaToken, deltatoken),
 		value(ast::QueryOption::Expand, expand),
-		value(ast::QueryOption::Filter, filter),
+		|i| filter_wip(i, ctx),
 		format_wip,
 		value(ast::QueryOption::Id, id),
 		value(ast::QueryOption::InlineCount, inlinecount),
@@ -799,6 +799,10 @@ named!(levels<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$levels"), t
 //*
 //* filter = ( "$filter" / "filter" ) EQ boolCommonExpr
 named!(filter<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$filter"), tag_no_case("filter"))), EQ, boolCommonExpr)))));
+fn filter_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::QueryOption<'a>> {
+	println!("parsing filter {}", input);
+	map(preceded(tuple((opt(tag("$")), tag_no_case("filter"), EQ)), boolCommonExpr), ast::QueryOption::Filter)(input)
+}
 //*
 //* orderby     = ( "$orderby" / "orderby" ) EQ orderbyItem *( COMMA orderbyItem )
 named!(orderby<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$orderby"), tag_no_case("orderby"))), EQ, orderbyItem, many0(tuple((COMMA, orderbyItem))))))));

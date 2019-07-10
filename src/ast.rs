@@ -89,7 +89,7 @@ pub enum QueryOption<'a> {
 	Compute,
 	DeltaToken,
 	Expand,
-	Filter,
+	Filter(&'a str),
 	Id,
 	InlineCount,
 	OrderBy,
