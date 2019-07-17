@@ -3,12 +3,15 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use std::str::FromStr;
 use std::collections::HashMap;
 use std::iter::FromIterator;
 
 use std::str;
 use super::ast;
 use super::schema;
+
+use uuid::Uuid;
 
 use nom::{IResult,Err,Needed};
 
@@ -802,8 +805,10 @@ named!(levels<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$levels"), t
 //* filter = ( "$filter" / "filter" ) EQ boolCommonExpr
 named!(filter<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$filter"), tag_no_case("filter"))), EQ, boolCommonExpr)))));
 fn filter_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::QueryOption<'a>> {
+	let (input, _) = cut(tuple((opt(tag("$")), tag_no_case("filter"), EQ)))(input)?;
 	println!("parsing filter {}", input);
-	map(preceded(tuple((opt(tag("$")), tag_no_case("filter"), EQ)), boolCommonExpr), ast::QueryOption::Filter)(input)
+
+	map(|i| commonExpr_wip(i, ctx, 0), ast::QueryOption::Filter)(input)
 }
 //*
 //* orderby     = ( "$orderby" / "orderby" ) EQ orderbyItem *( COMMA orderbyItem )
@@ -1097,6 +1102,60 @@ named!(commonExpr<&str, &str>, call!(recognize(tuple((
 						 ))),
 						 opt(alt((andExpr, orExpr)))
 					)))));
+fn commonExpr_wip<'a>(input: &'a str, ctx: &Parser, prec: u8) -> IResult<&'a str, ast::Expr> {
+	let (mut input, mut lhs) = alt((
+			 map(|i| primitiveLiteral_wip(i, ctx), ast::Expr::Lit),
+			 // arrayOrObject,
+			 // rootExpr,
+			 // |i| firstMemberExpr(i, ctx),
+			 // functionExpr,
+			 |i| negateExpr_wip(i, ctx),
+			 |i| methodCallExpr_wip(i, ctx),
+			 |i| parenExpr_wip(i, ctx),
+			 // castExpr,
+			 // isofExpr,
+			 |i| notExpr_wip(i, ctx),
+	))(input)?;
+
+	while let (i, Some(op)) = opt(verify(|i| binop_wip(i, ctx), |op| op.precedence() >= prec))(input)? {
+		let prec = op.precedence();
+
+		let (i, rhs) = match op {
+			// A list expression is only valid after the `in` operator but it's also ambiguous with the
+			// parenExpr if the list contains only one element. So we try it first
+			ast::BinOp::In => alt((|i| listExpr_wip(i, ctx), |i| commonExpr_wip(i, ctx, prec)))(i)?,
+			_ => commonExpr_wip(i, ctx, prec)?
+		};
+
+		input = i;
+		lhs = ast::Expr::Binary(op, Box::new(lhs), Box::new(rhs));
+	}
+
+	Ok((input, lhs))
+}
+
+fn binop_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::BinOp> {
+		// TODO sort them by frequency for better performance
+		// FIXME use FromStr just like the method call
+		delimited(RWS, alt((
+			value(ast::BinOp::Add, tag_no_case("add")),
+			value(ast::BinOp::Sub, tag_no_case("sub")),
+			value(ast::BinOp::Mul, tag_no_case("mul")),
+			value(ast::BinOp::Div, tag_no_case("div")),
+			value(ast::BinOp::DivBy, tag_no_case("divby")),
+			value(ast::BinOp::Mod, tag_no_case("mod")),
+			value(ast::BinOp::Eq, tag_no_case("eq")),
+			value(ast::BinOp::Ne, tag_no_case("ne")),
+			value(ast::BinOp::Lt, tag_no_case("lt")),
+			value(ast::BinOp::Le, tag_no_case("le")),
+			value(ast::BinOp::Gt, tag_no_case("gt")),
+			value(ast::BinOp::Ge, tag_no_case("ge")),
+			value(ast::BinOp::Has, tag_no_case("has")),
+			value(ast::BinOp::In, tag_no_case("in")),
+			value(ast::BinOp::And, tag_no_case("and")),
+			value(ast::BinOp::Or, tag_no_case("or")),
+		)), RWS)(input)
+}
 //*
 //* boolCommonExpr = commonExpr ; resulting in a Boolean
 //TODO(validate)
@@ -1300,6 +1359,16 @@ named!(methodCallExpr<&str, &str>, call!(alt((
 							, boolMethodCallExpr
 						))
 					))));
+fn methodCallExpr_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Expr> {
+	let (input, method) = map_res(take_while1(|c: char| c.is_alphabetic()), ast::Method::from_str)(input)?;
+
+	let (m, n) = method.arity();
+
+	let arg_parser = verify(separated_list(tuple((BWS, COMMA, BWS)), |i| commonExpr_wip(i, ctx, 0)), |v: &Vec<ast::Expr>| m <= v.len() && v.len() <= n);
+	let (input, args) = delimited(tuple((OPEN, BWS)), arg_parser, tuple((BWS, CLOSE)))(input)?;
+
+	Ok((input, ast::Expr::MethodCall(method, args)))
+}
 //*
 //* boolMethodCallExpr = endsWithMethodCallExpr
 //*                    / startsWithMethodCallExpr
@@ -1386,8 +1455,15 @@ named!(hasSubsequenceMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_c
 //*
 //* parenExpr = OPEN BWS commonExpr BWS CLOSE
 named!(parenExpr<&str, &str>, call!(recognize(tuple((OPEN, BWS, commonExpr, BWS, CLOSE)))));
+fn parenExpr_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Expr> {
+	delimited(tuple((OPEN, BWS)), |i| commonExpr_wip(i, ctx, 0), tuple((BWS, CLOSE)))(input)
+}
 //* listExpr  = OPEN BWS commonExpr BWS *( COMMA BWS commonExpr BWS ) CLOSE
 named!(listExpr<&str, &str>, call!(recognize(tuple((OPEN, BWS, commonExpr, many0(tuple((COMMA, BWS, commonExpr, BWS))), CLOSE)))));
+fn listExpr_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Expr> {
+	let element_parser = map(separated_nonempty_list(tuple((BWS, COMMA, BWS)), |i| commonExpr_wip(i, ctx, 0)), ast::Expr::List);
+	delimited(tuple((OPEN, BWS)), element_parser, tuple((BWS, CLOSE)))(input)
+}
 //*
 //* andExpr = RWS "and" RWS boolCommonExpr
 named!(andExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("and"), RWS, boolCommonExpr)))));
@@ -1427,9 +1503,21 @@ named!(modExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("mod"), RWS,
 //*
 //* negateExpr = "-" BWS commonExpr
 named!(negateExpr<&str, &str>, call!(recognize(tuple((tag("-"), BWS, commonExpr)))));
+fn negateExpr_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Expr> {
+	let op = ast::UnOp::Neg;
+	let (input, expr) = preceded(tag("-"), |i| commonExpr_wip(i, ctx, op.precedence()))(input)?;
+
+	Ok((input, ast::Expr::Unary(op, Box::new(expr))))
+}
 //*
 //* notExpr = "not" RWS boolCommonExpr
 named!(notExpr<&str, &str>, call!(recognize(tuple((tag_no_case("not"), RWS, boolCommonExpr)))));
+fn notExpr_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Expr> {
+	let op = ast::UnOp::Not;
+	let (input, expr) = preceded(tuple((tag_no_case("not"), RWS)), |i| commonExpr_wip(i, ctx, op.precedence()))(input)?;
+
+	Ok((input, ast::Expr::Unary(op, Box::new(expr))))
+}
 //*
 //* isofExpr = "isof" OPEN BWS [ commonExpr BWS COMMA BWS ] qualifiedTypeName BWS CLOSE
 named!(isofExpr<&str, &str>, call!(recognize(tuple((tag_no_case("isof"), OPEN, BWS, opt(tuple((commonExpr, BWS, COMMA, BWS))), qualifiedTypeName, BWS, CLOSE)))));
@@ -1872,6 +1960,49 @@ named!(primitiveLiteral<&str, &str>, call!(alt((
 							  , geometryPolygon
 						))
 					))));
+fn primitiveLiteral_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Lit> {
+	alt((
+		alt((
+			// XXX make sure these are ordered in a away that eliminates ambiguity
+			// We could also make sure that the input passed to this function contains only one
+			// literal and then use the complete() combinator for all the cases bellow
+			nullValue_wip,
+			booleanValue_wip,
+			guidValue_wip,
+			dateTimeOffsetValue_wip,
+			dateValue_wip,
+			// timeOfDayValue_wip,
+			// decimalValue_wip,
+			// doubleValue_wip,
+			// singleValue_wip,
+			// sbyteValue_wip,
+			// byteValue_wip,
+			// int16Value_wip,
+			// int32Value_wip,
+			// int64Value_wip,
+			// string_wip,
+			// duration_wip,
+			// _enum_wip,
+		)),
+		alt((
+			value(ast::Lit::Unimplemented, binary),
+			value(ast::Lit::Unimplemented, geographyCollection),
+			value(ast::Lit::Unimplemented, geographyLineString),
+			value(ast::Lit::Unimplemented, geographyMultiLineString),
+			value(ast::Lit::Unimplemented, geographyMultiPoint),
+			value(ast::Lit::Unimplemented, geographyMultiPolygon),
+			value(ast::Lit::Unimplemented, geographyPoint),
+			value(ast::Lit::Unimplemented, geographyPolygon),
+			value(ast::Lit::Unimplemented, geometryCollection),
+			value(ast::Lit::Unimplemented, geometryLineString),
+			value(ast::Lit::Unimplemented, geometryMultiLineString),
+			value(ast::Lit::Unimplemented, geometryMultiPoint),
+			value(ast::Lit::Unimplemented, geometryMultiPolygon),
+			value(ast::Lit::Unimplemented, geometryPoint),
+			value(ast::Lit::Unimplemented, geometryPolygon),
+		))
+	))(input)
+}
 //*
 //* ; in Atom and JSON message bodies and CSDL DefaultValue attributes
 //* primitiveValue = booleanValue
@@ -1932,10 +2063,16 @@ named!(primitiveValue<&str, &str>, call!(alt((
 //*
 //* nullValue = 'null'
 named!(nullValue<&str, &str>, call!(tag("null")));
+fn nullValue_wip(input: &str) -> IResult<&str, ast::Lit> {
+	value(ast::Lit::Null, tag("null"))(input)
+}
 //*
 //* ; base64url encoding according to http://tools.ietf.org/html/rfc4648#section-5
 //* binary      = "binary" SQUOTE binaryValue SQUOTE
 named!(binary<&str, &str>, call!(recognize(tuple((tag_no_case("binary"), SQUOTE, binaryValue, SQUOTE)))));
+fn binary_wip(input: &str) -> IResult<&str, ast::Lit> {
+	preceded(tag_no_case("binary"), delimited(SQUOTE, map(binaryValue, |b| ast::Lit::Binary(b.to_string())), SQUOTE))(input)
+}
 //* binaryValue = *(4base64char) [ base64b16  / base64b8 ]
 named!(binaryValue<&str, &str>, call!(recognize(tuple((many0(many_m_n(4, 4, base64char)), opt(alt((base64b16, base64b8))))))));
 //* base64b16   = 2base64char ( 'A' / 'E' / 'I' / 'M' / 'Q' / 'U' / 'Y' / 'c' / 'g' / 'k' / 'o' / 's' / 'w' / '0' / '4' / '8' )   [ "=" ]
@@ -1947,6 +2084,12 @@ named!(base64char<&str, &str>, call!(alt((ALPHA, DIGIT, tag("-"), tag("_")))));
 //*
 //* booleanValue = "true" / "false"
 named!(booleanValue<&str, &str>, call!(alt((tag_no_case("true"), tag_no_case("false")))));
+fn booleanValue_wip(input: &str) -> IResult<&str, ast::Lit> {
+	alt((
+		value(ast::Lit::Boolean(true), tag_no_case("true")),
+		value(ast::Lit::Boolean(false), tag_no_case("false")),
+	))(input)
+}
 //*
 //* decimalValue = [ SIGN ] 1*DIGIT [ "." 1*DIGIT ] [ "e" [ SIGN ] 1*DIGIT ] / nanInfinity
 named!(decimalValue<&str, &str>, call!(alt((recognize(tuple((opt(SIGN),
@@ -1969,6 +2112,9 @@ named!(guidValue<&str, &str>, call!(recognize(tuple((many_m_n(8, 8, HEXDIG), tag
 						many_m_n(4, 4, HEXDIG), tag("-"),
 						many_m_n(12, 12, HEXDIG)
 						)))));
+fn guidValue_wip(input: &str) -> IResult<&str, ast::Lit> {
+	map(map_res(take(uuid::adapter::Hyphenated::LENGTH), Uuid::from_str), ast::Lit::Guid)(input)
+}
 //*
 //* byteValue  = 1*3DIGIT           ; numbers in the range from 0 to 255
 named!(byteValue<&str, &str>, call!(recognize(many_m_n(1, 3, DIGIT))));
@@ -1989,12 +2135,24 @@ named!(SQUOTE_in_string<&str, &str>, call!(recognize(tuple((SQUOTE, SQUOTE)))));
 //*
 //* dateValue = year "-" month "-" day
 named!(dateValue<&str, &str>, call!(recognize(tuple((year, tag("-"), month, tag("-"), day)))));
+fn dateValue_wip(input: &str) -> IResult<&str, ast::Lit> {
+	let (input, (year, _, month, _, day)) = tuple((year_wip, tag("-"), month_wip, tag("-"), day_wip))(input)?;
+	Ok((input, ast::Lit::Date(year, month, day)))
+}
 //*
 //* dateTimeOffsetValue = year "-" month "-" day "T" hour ":" minute [ ":" second [ "." fractionalSeconds ] ] ( "Z" / SIGN hour ":" minute )
 named!(dateTimeOffsetValue<&str, &str>, call!(recognize(tuple((year, tag("-"), month, tag("-"), day, tag_no_case("T"), hour, tag(":"), minute,
 							  opt(tuple((tag(":"), second, opt(tuple((tag("."), fractionalSeconds)))))),
 							  alt((tag_no_case("Z"), recognize(tuple((SIGN, hour, tag(":"), minute)))))
 							  )))));
+fn dateTimeOffsetValue_wip(input: &str) -> IResult<&str, ast::Lit> {
+	let (input, (year, _, month, _, day)) = tuple((year_wip, tag("-"), month_wip, tag("-"), day_wip))(input)?;
+	let (input, (_, hour, _, minute)) = tuple((tag("T"), hour_wip, tag(":"), minute_wip))(input)?;
+
+	// FIXME correctly parse datetime offsets
+	Ok((input, ast::Lit::DateTimeOffset(year, month, day, hour, minute)))
+}
+
 //*
 //* duration      = [ "duration" ] SQUOTE durationValue SQUOTE
 named!(duration<&str, &str>, call!(recognize(tuple((opt(tag_no_case("duration")), SQUOTE, durationValue, SQUOTE)))));
@@ -2020,11 +2178,18 @@ named!(oneToNine<&str, &str>, call!(recognize(one_of("123456789"))));
 named!(zeroToFiftyNine<&str, &str>, call!(recognize(tuple((one_of("012345"), DIGIT)))));
 //* year  = [ "-" ] ( "0" 3DIGIT / oneToNine 3*DIGIT )
 named!(year<&str, &str>, call!(recognize(tuple((opt(tag("-")), alt((recognize(tuple((tag("0"), many_m_n(3, 3, DIGIT)))), recognize(tuple((oneToNine, many_m_n(3, 3, DIGIT)))))))))));
+fn year_wip(input: &str) -> IResult<&str, i16> {
+	map_res(recognize(tuple((opt(tag("-")), take_while_m_n(4, 4, |c: char| c.is_digit(10))))), i16::from_str)(input)
+}
+
 //* month = "0" oneToNine
 //*       / "1" ( "0" / "1" / "2" )
 named!(month<&str, &str>, call!(alt((  recognize(tuple((tag("0"), oneToNine)))
 			       , recognize(tuple((tag("1"), one_of("012"))))
 			       ))));
+fn month_wip(input: &str) -> IResult<&str, u8> {
+	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), u8::from_str), |m| (1 <= *m && *m <= 12))(input)
+}
 //* day   = "0" oneToNine
 //*       / ( "1" / "2" ) DIGIT
 //*       / "3" ( "0" / "1" )
@@ -2032,15 +2197,27 @@ named!(day<&str, &str>, call!(alt((  recognize(tuple((tag("0"), oneToNine)))
 			     , recognize(tuple((one_of("12"), DIGIT)))
 			     , recognize(tuple((tag("3"), one_of("01"))))
 			     ))));
+fn day_wip(input: &str) -> IResult<&str, u8> {
+	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), u8::from_str), |m| (1 <= *m && *m <= 31))(input)
+}
 //* hour   = ( "0" / "1" ) DIGIT
 //*        / "2" ( "0" / "1" / "2" / "3" )
 named!(hour<&str, &str>, call!(alt((  recognize(tuple((one_of("01"), DIGIT)))
 			      , recognize(tuple((tag("2"), one_of("0123"))))
 			      ))));
+fn hour_wip(input: &str) -> IResult<&str, u8> {
+	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), u8::from_str), |m| *m <= 23)(input)
+}
 //* minute = zeroToFiftyNine
 named!(minute<&str, &str>, call!(recognize(zeroToFiftyNine)));
+fn minute_wip(input: &str) -> IResult<&str, u8> {
+	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), u8::from_str), |m| *m <= 59)(input)
+}
 //* second = zeroToFiftyNine
 named!(second<&str, &str>, call!(recognize(zeroToFiftyNine)));
+fn second_wip(input: &str) -> IResult<&str, u8> {
+	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), u8::from_str), |m| *m <= 59)(input)
+}
 //* fractionalSeconds = 1*12DIGIT
 named!(fractionalSeconds<&str, &str>, call!(recognize(many_m_n(1, 12, DIGIT))));
 //*
