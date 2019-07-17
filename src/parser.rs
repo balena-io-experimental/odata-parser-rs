@@ -156,17 +156,16 @@ fn serviceRoot<'a>(input: &'a str, ctx: &Parser, service_root: &'a str) -> IResu
 //*                  / resourcePath [ "?" queryOptions ]
 fn odataRelativeUri<'a>(input: &'a str, ctx: &'a Parser, schema: &'a schema::Schema)-> IResult<&'a str, ast::RelativeURI<'a>> {
 	alt((
-		map(preceded(tag("$batch"), opt(preceded(tag("?"), batchOptions))), ast::RelativeURI::Batch)
-		, value(ast::RelativeURI::Entity, tuple((tag("$entity"), tag("?"), entityOptions)))
-		, value(ast::RelativeURI::Entity, tuple((tag("$entity/"), qualifiedEntityTypeName, tag("?"), entityCastOptions)))
-		, value(ast::RelativeURI::Metadata, tuple((tag("$metadata"), opt(tuple((tag("?"), metadataOptions))), opt(context))))
-		, |input: &'a str| {
-			do_parse!(input,
-				segments: call!(resourcePath, ctx, schema.get_entity_container()) >>
-				options: call!(opt(preceded(tag("?"), |i| queryOptions_wip(i, ctx)))) >>
-				(ast::RelativeURI::Resource(ast::ResourcePath{segments, options}))
-			)
-		}
+		map(preceded(tag("$batch"), opt(preceded(tag("?"), batchOptions))), ast::RelativeURI::Batch),
+		value(ast::RelativeURI::Entity, tuple((tag("$entity"), tag("?"), entityOptions))),
+		value(ast::RelativeURI::Entity, tuple((tag("$entity/"), qualifiedEntityTypeName, tag("?"), entityCastOptions))),
+		value(ast::RelativeURI::Metadata, tuple((tag("$metadata"), opt(tuple((tag("?"), metadataOptions))), opt(context)))),
+		|input: &'a str| {
+				let (input, segments) = resourcePath(input, ctx, schema.get_entity_container())?;
+				// let kind = ast::kind::PathKind::Single(ast::kind::Kind::Entity())
+				let (input, options) = opt(preceded(tag("?"), |i| queryOptions_wip(i, ctx)))(input)?;
+				Ok((input, ast::RelativeURI::Resource(ast::ResourcePath{segments, options})))
+		},
 	))(input)
 }
 

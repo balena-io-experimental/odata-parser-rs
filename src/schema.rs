@@ -213,6 +213,15 @@ pub mod property {
 		Navigation(Navigation),
 	}
 
+	impl Property {
+		pub fn name(&self) -> &Identifier {
+			match self {
+				Property::Structural(p) => &p.name,
+				Property::Navigation(p) => &p.name,
+			}
+		}
+	}
+
 	#[derive(Clone,Debug,Eq,PartialEq)]
 	pub enum Type {
 		Primitive(super::kind::Primitive),
