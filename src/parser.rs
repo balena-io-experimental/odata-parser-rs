@@ -338,6 +338,7 @@ fn keyValuePair_wip<'a>(input: &'a str, ctx: &Parser, props: &'a HashMap<schema:
 }
 //* keyPropertyValue = primitiveLiteral
 named!(keyPropertyValue<&str, &str>, call!(recognize(primitiveLiteral)));
+// FIXME validate the primitive against the property type
 fn keyPropertyValue_wip<'a>(input: &'a str, ctx: &Parser, property: &'a schema::property::Property) -> IResult<&'a str, ast::KeyValue<'a>> {
 	map(primitiveLiteral, ast::KeyValue::Value)(input)
 }
@@ -894,6 +895,7 @@ named!(selectItem<&str, &str>, call!(alt((STAR
 //*                / selectPath [ OPEN selectOption *( SEMI selectOption ) CLOSE
 //*                             / "/" selectProperty
 //*                             ]
+// errata: missing brackets around the OPEN selectOption... and around "/" selectProperty
 named!(selectProperty<&str, &str>, call!(alt((primitiveProperty
 					, recognize(tuple((primitiveColProperty, opt(tuple((OPEN, selectOptionPC, many0(tuple((SEMI, selectOptionPC))), CLOSE))))))
 					, navigationProperty
