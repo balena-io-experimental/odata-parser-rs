@@ -134,12 +134,28 @@ impl<'a> Parser<'a> {
 	}
 }
 
-pub fn odataUri<'a>(input: &'a str, ctx: &'a Parser, document: &'a schema::Document) -> IResult<&'a str, ast::ODataURI<'a>> {
-	do_parse!(input,
-		service_root: call!(serviceRoot, ctx, &document.service_root) >>
-		relative_uri: call!(opt(|input| odataRelativeUri(input, ctx, &document.schema))) >>
-		(ast::ODataURI{service_root, relative_uri})
-	)
+pub fn odataUri<'a>(input: &'a str, ctx: &Parser, document: &'a schema::Document) -> IResult<&'a str, ast::ODataURI<'a>> {
+	// src: http://docs.oasis-open.org/odata/odata/v4.01/cs01/part2-url-conventions/odata-v4.01-cs01-part2-url-conventions.html#sec_URLComponents
+	// Mandated and suggested content of these three significant URL components used by an OData
+	// service are covered in sequence in the three following chapters.  OData follows the URI
+	// syntax rules defined in [RFC3986] and in addition assigns special meaning to several of the
+	// sub-delimiters defined by [RFC3986], so special care has to be taken regarding parsing and
+	// percent-decoding.
+	//
+	// [RFC3986] defines three steps for URL processing that MUST be performed before percent-decoding:
+	// ·       Split undecoded URL into components scheme, hier-part, query, and fragment at first ":", then first "?", and then first "#"
+	// ·       Split undecoded hier-part into authority and path
+	// ·       Split undecoded path into path segments at "/"
+	//
+	// After applying these steps defined by RFC3986 the following steps MUST be performed:
+	// ·       Split undecoded query at "&" into query options, and each query option at the first "=" into query option name and query option value
+	// ·       Percent-decode path segments, query option names, and query option values exactly once
+	// ·       Interpret path segments, query option names, and query option values according to OData rules
+
+	let (input, service_root) = serviceRoot(input, ctx, &document.service_root)?;
+	let (input, relative_uri) = opt(|i| odataRelativeUri(i, ctx, &document.schema))(input)?;
+
+	Ok((input, ast::ODataURI{service_root, relative_uri}))
 }
 //*
 //* serviceRoot = ( "https" / "http" )                    ; Note: case-insensitive
@@ -157,19 +173,27 @@ fn serviceRoot<'a>(input: &'a str, ctx: &Parser, service_root: &'a str) -> IResu
 //*                  / '$entity' "/" qualifiedEntityTypeName "?" entityCastOptions
 //*                  / '$metadata' [ "?" metadataOptions ] [ context ]
 //*                  / resourcePath [ "?" queryOptions ]
-fn odataRelativeUri<'a>(input: &'a str, ctx: &'a Parser, schema: &'a schema::Schema)-> IResult<&'a str, ast::RelativeURI<'a>> {
-	alt((
+fn odataRelativeUri<'a>(input: &'a str, ctx: &Parser, schema: &'a schema::Schema)-> IResult<&'a str, ast::RelativeURI<'a>> {
+	let (path, input) = input.split_at(input.find('?').unwrap_or(input.len()));
+	let (query, fragment) = input.split_at(input.find('#').unwrap_or(input.len()));
+	//FIXME we should split and decode path here isntead of parsing it as a string
+	// let path = path.split('/');
+
+	return alt((
 		map(preceded(tag("$batch"), opt(preceded(tag("?"), batchOptions))), ast::RelativeURI::Batch),
 		value(ast::RelativeURI::Entity, tuple((tag("$entity"), tag("?"), entityOptions))),
 		value(ast::RelativeURI::Entity, tuple((tag("$entity/"), qualifiedEntityTypeName, tag("?"), entityCastOptions))),
 		value(ast::RelativeURI::Metadata, tuple((tag("$metadata"), opt(tuple((tag("?"), metadataOptions))), opt(context)))),
 		|input: &'a str| {
-				let (input, segments) = resourcePath(input, ctx, schema.get_entity_container())?;
-				// let kind = ast::kind::PathKind::Single(ast::kind::Kind::Entity())
-				let (input, options) = opt(preceded(tag("?"), |i| queryOptions_wip(i, ctx)))(input)?;
-				Ok((input, ast::RelativeURI::Resource(ast::ResourcePath{segments, options})))
+			// FIXME fully computing the resourcePath expression needs the parameter aliases
+			// FIXME we have to ensure that the full path was consumed
+			let (input, resource) = all_consuming(|i| resourcePath(i, ctx, schema.get_entity_container()))(path)?;
+
+			// let kind = ast::kind::PathKind::Single(ast::kind::Kind::Entity())
+			let (input, options) = opt(preceded(tag("?"), |i| queryOptions_wip(i, ctx)))(query)?;
+			Ok((input, ast::RelativeURI::Resource(ast::ResourcePath{segments: resource, options})))
 		},
-	))(input)
+	))(input);
 }
 
 //*
@@ -190,9 +214,9 @@ fn odataRelativeUri<'a>(input: &'a str, ctx: &'a Parser, schema: &'a schema::Sch
 //*              / functionImportCallNoParens
 //*              / crossjoin
 //*              / '$all'                         [ "/" qualifiedEntityTypeName ]
-fn resourcePath<'a>(input: &'a str, ctx: &'a Parser, entity_container: &'a schema::EntityContainer) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
-	alt((
-		|i: &'a str| {
+fn resourcePath<'a>(input: &'a str, ctx: &Parser, entity_container: &'a schema::EntityContainer) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+	return alt((
+		|i| {
 			let (i, entity_set) = entitySetName_wip(i, ctx, entity_container)?;
 			let (i, options) = opt(|i: &'a str| collectionNavigation_wip(i, ctx, &entity_set.kind))(i)?;
 
@@ -201,39 +225,35 @@ fn resourcePath<'a>(input: &'a str, ctx: &'a Parser, entity_container: &'a schem
 				path.append(&mut options);
 			}
 			Ok((i, path))
-		}
-		, value(vec![ast::PathSegment::Singleton], recognize(tuple((singletonEntity, opt(singleNavigation)))))
-		, value(vec![ast::PathSegment::Action], actionImportCall)
-		, value(vec![ast::PathSegment::Function], recognize(tuple((entityColFunctionImportCall, opt(collectionNavigation)))))
-		, value(vec![ast::PathSegment::Function], recognize(tuple((entityFunctionImportCall, opt(singleNavigation)))))
-		, value(vec![ast::PathSegment::Function], recognize(tuple((complexColFunctionImportCall, opt(complexColPath)))))
-		, value(vec![ast::PathSegment::Function], recognize(tuple((complexFunctionImportCall, opt(complexPath)))))
-		, value(vec![ast::PathSegment::Function], recognize(tuple((primitiveColFunctionImportCall, opt(primitiveColPath)))))
-		, value(vec![ast::PathSegment::Function], recognize(tuple((primitiveFunctionImportCall, opt(primitivePath)))))
-		, value(vec![ast::PathSegment::Function], functionImportCallNoParens)
-		, value(vec![ast::PathSegment::Crossjoin], crossjoin)
-		, value(vec![ast::PathSegment::All], recognize(tuple((tag("$all"), opt(tuple((tag("/"), qualifiedEntityTypeName)))))))
-	))(input)
+		},
+		value(vec![ast::PathSegment::Singleton], recognize(tuple((singletonEntity, opt(singleNavigation))))),
+		value(vec![ast::PathSegment::Action], actionImportCall),
+		value(vec![ast::PathSegment::Function], recognize(tuple((entityColFunctionImportCall, opt(collectionNavigation))))),
+		value(vec![ast::PathSegment::Function], recognize(tuple((entityFunctionImportCall, opt(singleNavigation))))),
+		value(vec![ast::PathSegment::Function], recognize(tuple((complexColFunctionImportCall, opt(complexColPath))))),
+		value(vec![ast::PathSegment::Function], recognize(tuple((complexFunctionImportCall, opt(complexPath))))),
+		value(vec![ast::PathSegment::Function], recognize(tuple((primitiveColFunctionImportCall, opt(primitiveColPath))))),
+		value(vec![ast::PathSegment::Function], recognize(tuple((primitiveFunctionImportCall, opt(primitivePath))))),
+		value(vec![ast::PathSegment::Function], functionImportCallNoParens),
+		value(vec![ast::PathSegment::Crossjoin], crossjoin),
+		value(vec![ast::PathSegment::All], recognize(tuple((tag("$all"), opt(tuple((tag("/"), qualifiedEntityTypeName))))))),
+	))(input);
 }
 
 //*
 //* collectionNavigation = [ "/" qualifiedEntityTypeName ] [ collectionNavPath ]
 named!(collectionNavigation<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedEntityTypeName))), opt(collectionNavPath))))));
-fn collectionNavigation_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
-	do_parse!(input,
-		cast: call!(opt(preceded(tag("/"), qualifiedEntityTypeName))) >>
-		path: call!(opt(|i| collectionNavPath_wip(i, ctx, kind))) >>
-		({
-			let mut result = vec![];
-			if let Some(cast) = cast {
-				result.push(ast::PathSegment::Cast);
-			}
-			if let Some(mut path) = path {
-				result.append(&mut path);
-			}
-			result
-		})
-	)
+fn collectionNavigation_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+	let (input, cast) = opt(preceded(tag("/"), qualifiedEntityTypeName))(input)?;
+	let (input, path) = opt(|i| collectionNavPath_wip(i, ctx, kind))(input)?;
+	let mut result = vec![];
+	if let Some(cast) = cast {
+		result.push(ast::PathSegment::Cast);
+	}
+	if let Some(mut path) = path {
+		result.append(&mut path);
+	}
+	Ok((input, result))
 }
 //* collectionNavPath    = keyPredicate [ singleNavigation ]
 //*                      / filterInPath [ collectionNavigation ]
@@ -252,7 +272,7 @@ named!(collectionNavPath<&str, &str>, call!(alt((recognize(tuple((keyPredicate, 
 					   , count
 					   , _ref
 					))));
-fn collectionNavPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn collectionNavPath_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	alt((
 		|i| {
 			let (i, filter) = filterInPath_wip(i)?;
@@ -380,7 +400,7 @@ named!(singleNavigation<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"),
 														   , _ref
 														   , _value
 														   ))))))));
-fn singleNavigation_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn singleNavigation_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	//FIXME
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedEntityTypeName)))(input)?;
 	let (input, path) = opt(alt((
@@ -416,7 +436,7 @@ named!(propertyPath<&str, &str>, call!(recognize(alt((tuple((entityColNavigation
 						 , tuple((primitiveProperty, opt(primitivePath)))
 						 , tuple((streamProperty, opt(boundOperation)))
 						 )))));
-fn propertyPath_wip<'a>(input: &'a str, ctx: &'a Parser, properties: &'a HashMap<schema::Identifier, schema::property::Property>) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn propertyPath_wip<'a>(input: &'a str, ctx: &Parser, properties: &'a HashMap<schema::Identifier, schema::property::Property>) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	use schema::kind;
 	use schema::property::*;
 
@@ -445,7 +465,7 @@ fn propertyPath_wip<'a>(input: &'a str, ctx: &'a Parser, properties: &'a HashMap
 //*
 //* primitiveColPath = count / boundOperation / ordinalIndex
 named!(primitiveColPath<&str, &str>, call!(alt((count, boundOperation, ordinalIndex))));
-fn primitiveColPath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn primitiveColPath_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	alt((
 		map(count_wip, |c| vec![c]),
 		|i| boundOperation_wip(i, ctx),
@@ -456,7 +476,7 @@ fn primitiveColPath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str,
 //*
 //* primitivePath  = value / boundOperation
 named!(primitivePath<&str, &str>, call!(alt((_value, boundOperation))));
-fn primitivePath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn primitivePath_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	alt((
 		map(_value_wip, |c| vec![c]),
 		|i| boundOperation_wip(i, ctx)
@@ -468,7 +488,7 @@ fn primitivePath_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Ve
 //  errata: The ABNF doesn't allow selecting a specific element and then continuing with a complexPath
 //  rule. Is this a mistake?
 named!(complexColPath<&str, &str>, call!(alt((ordinalIndex, recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((count, boundOperation))))))))));
-fn complexColPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Complex) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn complexColPath_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Complex) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	alt((
 		map(|i| ordinalIndex_wip(i, ctx), |index| vec![index]),
 		|input| {
@@ -492,7 +512,7 @@ fn complexColPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kin
 //*                  / boundOperation
 //*                  ]
 named!(complexPath<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((recognize(tuple((tag("/"), propertyPath))), boundOperation))))))));
-fn complexPath_wip<'a>(input: &'a str, ctx: &'a Parser, kind: &'a schema::kind::Complex) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn complexPath_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Complex) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedComplexTypeName)))(input)?;
 	let (input, path) = opt(alt((
 		preceded(tag("/"), |i| propertyPath_wip(i, ctx, &kind.properties)),
@@ -531,7 +551,7 @@ named!(_value_wip<&str, ast::PathSegment>, call!(value(ast::PathSegment::Value, 
 //  indices too. See:
 //  http://docs.oasis-open.org/odata/odata/v4.01/cs01/part1-protocol/odata-v4.01-cs01-part1-protocol.html#sec_RequestinganIndividualMemberofanOrde
 named!(ordinalIndex<&str, &str>, call!(recognize(tuple((tag("/"), many1(DIGIT))))));
-fn ordinalIndex_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, ast::PathSegment<'a>> {
+fn ordinalIndex_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::PathSegment<'a>> {
 	map(preceded(tag("/"), map_res(recognize(tuple((opt(tag("-")), digit1))), |n: &str| n.parse())), ast::PathSegment::OrdinalIndex)(input)
 }
 //*
@@ -556,7 +576,7 @@ named!(boundOperation<&str, &str>, call!(recognize(tuple((tag("/"), alt((boundAc
 								     , recognize(tuple((boundPrimitiveFunctionCall, opt(primitivePath))))
 								     , boundFunctionCallNoParens
 								     )))))));
-fn boundOperation_wip<'a>(input: &'a str, ctx: &'a Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn boundOperation_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
 	// FIXME
 	value(vec![], boundOperation)(input)
 }
