@@ -110,7 +110,7 @@ pub mod kind {
 	use std::collections::HashMap;
 	use super::Identifier;
 
-	#[derive(Clone,Debug,Eq,PartialEq)]
+	#[derive(Copy,Clone,Debug,Eq,PartialEq)]
 	pub enum Primitive {
 		Binary,
 		Boolean,
@@ -324,12 +324,19 @@ pub enum EntityContainerMember {
 	FunctionImport,
 }
 
-#[derive(Clone,Debug,Eq,PartialEq)]
+#[derive(Clone,Eq,PartialEq)]
 pub struct EntitySet {
 	pub name: Identifier,
 	pub include_in_service_document: bool,
 	pub kind: kind::Entity,
 }
+
+impl fmt::Debug for EntitySet {
+	fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+		write!(fmt, "EntitySet({})", self.name)
+	}
+}
+
 
 #[derive(Debug,Eq,PartialEq)]
 pub struct Singleton {

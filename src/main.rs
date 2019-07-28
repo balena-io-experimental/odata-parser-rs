@@ -5,7 +5,6 @@ extern crate nom;
 
 mod parser;
 mod ast;
-mod compiler;
 mod schema;
 
 use std::collections::HashMap;
@@ -111,8 +110,8 @@ fn main() {
 
 	let mut p = parser::Parser::new(&doc);
 	// println!("{:?}", parser::odataRelativeUri("ProductsByComplex(complex=@c)?@c={\"@odata.type\":\"Model.Customer\",\"Name\":\"Value\"}\n"));
-	// println!("{:#?}", p.parse("https://example.com/foobar/users/$filter=@foo/$filter=@bar/$count"));
-	let (_, tree) = p.parse("https://example.com/foobar/applications?$filter=true in (true, false, true)").unwrap();
+	// println!("{:#?}", p.parse("https://example.com/foobar/users/$filter=@foo/$filter=@bar/$count?$filter=true eq true"));
+	let (_, tree) = p.parse("https://example.com/foobar/applications/namespace.foo/$filter=@a/$filter=@b/foo.bar(null)").unwrap();
 
 	println!("{:#?}", tree);
 	// println!("{:#?}", compiler::compile_sql(&tree, &doc));

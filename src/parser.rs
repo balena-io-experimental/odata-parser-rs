@@ -6,14 +6,18 @@
 use std::str::FromStr;
 use std::collections::HashMap;
 use std::iter::FromIterator;
+use std::convert::From;
+use std::rc::Rc;
 
 use std::str;
 use super::ast;
+use super::ast::{ExprKind,Expr};
 use super::schema;
 
 use uuid::Uuid;
 
 use nom::{IResult,Err,Needed};
+use nom::error::ErrorKind;
 
 use nom::bytes::complete::*;
 use nom::character::*;
@@ -23,6 +27,158 @@ use nom::multi::*;
 use nom::number::complete::*;
 use nom::sequence::*;
 use nom::branch::*;
+
+use std::cell::Cell;
+
+/// Expression result
+fn expr<'a, F>(f: F) -> impl Fn(Input<'a>) -> ExprOutput<'a>
+where F: Fn(Input<'a>) -> IResult<Input<'a>, ast::ExprKind<'a>>
+{
+	move |input| {
+		match f(input.clone()) {
+			Ok((input, kind)) => {
+				let expr = Rc::new(input.parser.expr(kind));
+				Ok((input, expr))
+			}
+			err @ _ => unimplemented!(),
+		}
+	}
+}
+
+use nom::{InputIter,InputLength,InputTake,InputTakeAtPosition,Compare,Slice,Offset};
+use std::ops::RangeTo;
+
+#[derive(Clone,Debug)]
+// If we don't derive Copy the compiler will scream at you if you try to reuse the same "slice"
+// twice.
+pub struct Input<'a> {
+	parser: &'a Parser<'a>,
+	data: &'a str,
+	ty: ast::Ty<'a>,
+}
+
+impl nom::UnspecializedInput for Input<'_> {}
+
+impl Input<'_> {
+	fn to_string(&self) -> String {
+		String::from(self.data)
+	}
+
+	fn len(&self) -> usize {
+		self.data.len()
+	}
+
+	fn split_at(&self, mid: usize) -> (Self, Self) {
+		let (a, b) = self.data.split_at(mid);
+		let a = Self{
+			parser: self.parser,
+			data: a,
+			ty: self.ty,
+		};
+		let b = Self{
+			parser: self.parser,
+			data: b,
+			ty: self.ty,
+		};
+		(a, b)
+	}
+}
+impl InputTake for Input<'_> {
+	fn take(&self, count: usize) -> Self {
+		Self {
+			parser: self.parser,
+			data: InputTake::take(&self.data, count),
+			ty: self.ty,
+		}
+	}
+	fn take_split(&self, count: usize) -> (Self, Self) {
+		let (a, b) = InputTake::take_split(&self.data, count);
+		(
+			Self {
+				parser: self.parser,
+				data: a,
+				ty: self.ty,
+			},
+			Self {
+				parser: self.parser,
+				data: b,
+				ty: self.ty,
+			}
+		)
+	}
+}
+
+impl<'a> InputIter for Input<'a> {
+    type Item = <&'a str as InputIter>::Item;
+    type Iter = <&'a str as InputIter>::Iter;
+    type IterElem =  <&'a str as InputIter>::IterElem;
+    fn iter_indices(&self) -> Self::Iter {
+		InputIter::iter_indices(self)
+	}
+    fn iter_elements(&self) -> Self::IterElem {
+		InputIter::iter_elements(self)
+	}
+    fn position<P>(&self, predicate: P) -> Option<usize>
+    where
+        P: Fn(Self::Item) -> bool,
+	{
+		InputIter::position(self, predicate)
+	}
+    fn slice_index(&self, count: usize) -> Option<usize> {
+		InputIter::slice_index(self, count)
+	}
+}
+
+impl Compare<&str> for Input<'_> {
+	fn compare(&self, t: &str) -> nom::CompareResult {
+		Compare::compare(&self.data, t)
+	}
+	fn compare_no_case(&self, t: &str) -> nom::CompareResult {
+		Compare::compare_no_case(&self.data, t)
+	}
+}
+
+impl Slice<std::ops::RangeTo<usize>> for Input<'_> {
+	fn slice(&self, range: std::ops::RangeTo<usize>) -> Self {
+		Self{
+			parser: self.parser,
+			data: Slice::slice(&self.data, range),
+			ty: self.ty,
+		}
+	}
+}
+
+impl Slice<std::ops::RangeFrom<usize>> for Input<'_> {
+	fn slice(&self, range: std::ops::RangeFrom<usize>) -> Self {
+		Self{
+			parser: self.parser,
+			data: Slice::slice(&self.data, range),
+			ty: self.ty,
+		}
+	}
+}
+
+impl Offset for Input<'_> {
+	fn offset(&self, second: &Self) -> usize {
+		Offset::offset(&self.data, &second.data)
+	}
+}
+
+impl InputLength for Input<'_> {
+	fn input_len(&self) -> usize {
+		InputLength::input_len(&self.data)
+	}
+}
+
+impl std::cmp::PartialEq for Input<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
+
+impl std::cmp::Eq for Input<'_> {}
+
+type ExprOutput<'a> = IResult<Input<'a>, Rc<ast::Expr<'a>>>;
 
 //* ;------------------------------------------------------------------------------
 //* ; OData ABNF Construction Rules Version 4.01
@@ -117,24 +273,85 @@ use nom::branch::*;
 //*
 //* odataUri = serviceRoot [ odataRelativeUri ]
 
-pub struct Parser<'a> {
-	document: &'a schema::Document,
-	// bound_vars: RefCell<HashMap<Identifier, (Type, Option<Value>>>,
+use std::cell::RefCell;
+
+#[derive(Debug)]
+struct Scope<'a> {
+	/// Essentially a list of stack frames
+	vars: RefCell<Vec<Vec<(String, (ast::NodeId, ast::Ty<'a>))>>>
 }
 
-impl<'a> Parser<'a> {
-	pub fn new(document: &'a schema::Document) -> Self {
-		Parser{
-			document: document,
+impl Scope<'_> {
+	fn new() -> Self {
+		Scope{
+			vars: RefCell::new(vec![]),
 		}
 	}
 
-	pub fn parse(&'a mut self, input: &'a str) -> IResult<&'a str, ast::ODataURI<'a>> {
-		odataUri(input, self, self.document)
+	fn resolve(&self, name: &str) -> Option<(ast::NodeId, ast::Ty)> {
+		self.vars.borrow()
+			.iter()
+			.rev()
+			.find_map(|frame| {
+				frame
+					.iter()
+					.rev()
+					.find(|v| v.0 == name).map(|v| v.1.clone())
+			})
+	}
+
+	fn push(&self, name: &str, id: ast::NodeId, ty: ast::Ty) {
+		unimplemented!()
+	}
+
+	fn push_frame(&self) {
+		unimplemented!()
+	}
+
+	fn pop_frame(&self) {
+		unimplemented!()
 	}
 }
 
-pub fn odataUri<'a>(input: &'a str, ctx: &Parser, document: &'a schema::Document) -> IResult<&'a str, ast::ODataURI<'a>> {
+#[derive(Debug)]
+pub struct Parser<'a> {
+	document: &'a schema::Document,
+	next_node_id: Cell<ast::NodeId>,
+	scope: Scope<'a>,
+	// bound_vars: RefCell<HashMap<Identifier, (Type, Option<Value>>>,
+}
+
+impl<'a, 'b> Parser<'a> {
+	pub fn new(document: &'a schema::Document) -> Self {
+		Parser{
+			document: document,
+			next_node_id: Cell::new(1),
+			scope: Scope::new(),
+		}
+	}
+
+	pub fn expr(&self, node: ast::ExprKind<'b>) -> ast::Expr<'b> {
+		let expr = ast::Expr{
+			id: self.next_node_id.get(),
+			node,
+		};
+
+		self.next_node_id.set(expr.id + 1);
+		expr
+	}
+
+	pub fn parse(&'a mut self, input: &'a str) -> IResult<Input<'a>, ast::ODataURI<'a>> {
+		let input = Input{
+			parser: self,
+			data: input,
+			ty: ast::Ty::None,
+		};
+
+		odataUri(input, self.document)
+	}
+}
+
+pub fn odataUri<'a>(input: Input<'a>, document: &'a schema::Document) -> IResult<Input<'a>, ast::ODataURI<'a>> {
 	// src: http://docs.oasis-open.org/odata/odata/v4.01/cs01/part2-url-conventions/odata-v4.01-cs01-part2-url-conventions.html#sec_URLComponents
 	// Mandated and suggested content of these three significant URL components used by an OData
 	// service are covered in sequence in the three following chapters.  OData follows the URI
@@ -152,16 +369,16 @@ pub fn odataUri<'a>(input: &'a str, ctx: &Parser, document: &'a schema::Document
 	// ·       Percent-decode path segments, query option names, and query option values exactly once
 	// ·       Interpret path segments, query option names, and query option values according to OData rules
 
-	let (input, service_root) = serviceRoot(input, ctx, &document.service_root)?;
-	let (input, relative_uri) = opt(|i| odataRelativeUri(i, ctx, &document.schema))(input)?;
+	let (input, service_root) = serviceRoot(input, &document.service_root)?;
+	let (input, relative_uri) = opt(|i| odataRelativeUri(i, &document.schema))(input)?;
 
-	Ok((input, ast::ODataURI{service_root, relative_uri}))
+	Ok((input, ast::ODataURI{service_root: service_root.data, relative_uri}))
 }
 //*
 //* serviceRoot = ( "https" / "http" )                    ; Note: case-insensitive
 //*               "://" host [ ":" port ]
 //*               "/" *( segment-nz "/" )
-fn serviceRoot<'a>(input: &'a str, ctx: &Parser, service_root: &'a str) -> IResult<&'a str, &'a str> {
+fn serviceRoot<'a>(input: Input<'a>, service_root: &'a str) -> IResult<Input<'a>, Input<'a>> {
 	// FIXME this should be relaxed to accept case-insensitive http(s), default ports, etc
 	tag(service_root)(input)
 }
@@ -173,9 +390,9 @@ fn serviceRoot<'a>(input: &'a str, ctx: &Parser, service_root: &'a str) -> IResu
 //*                  / '$entity' "/" qualifiedEntityTypeName "?" entityCastOptions
 //*                  / '$metadata' [ "?" metadataOptions ] [ context ]
 //*                  / resourcePath [ "?" queryOptions ]
-fn odataRelativeUri<'a>(input: &'a str, ctx: &Parser, schema: &'a schema::Schema)-> IResult<&'a str, ast::RelativeURI<'a>> {
-	let (path, input) = input.split_at(input.find('?').unwrap_or(input.len()));
-	let (query, fragment) = input.split_at(input.find('#').unwrap_or(input.len()));
+fn odataRelativeUri<'a>(input: Input<'a>, schema: &'a schema::Schema)-> IResult<Input<'a>, ast::RelativeURI<'a>> {
+	let (path, input) = input.split_at(input.data.find('?').unwrap_or(input.len()));
+	let (query, fragment) = input.split_at(input.data.find('#').unwrap_or(input.len()));
 	//FIXME we should split and decode path here isntead of parsing it as a string
 	// let path = path.split('/');
 
@@ -184,14 +401,14 @@ fn odataRelativeUri<'a>(input: &'a str, ctx: &Parser, schema: &'a schema::Schema
 		value(ast::RelativeURI::Entity, tuple((tag("$entity"), tag("?"), entityOptions))),
 		value(ast::RelativeURI::Entity, tuple((tag("$entity/"), qualifiedEntityTypeName, tag("?"), entityCastOptions))),
 		value(ast::RelativeURI::Metadata, tuple((tag("$metadata"), opt(tuple((tag("?"), metadataOptions))), opt(context)))),
-		|input: &'a str| {
+		|input: Input<'a>| {
 			// FIXME fully computing the resourcePath expression needs the parameter aliases
 			// FIXME we have to ensure that the full path was consumed
-			let (input, resource) = all_consuming(|i| resourcePath(i, ctx, schema.get_entity_container()))(path)?;
+			let (input, resource) = all_consuming(|i| resourcePath(i, schema.get_entity_container()))(path.clone())?;
 
 			// let kind = ast::kind::PathKind::Single(ast::kind::Kind::Entity())
-			let (input, options) = opt(preceded(tag("?"), |i| queryOptions_wip(i, ctx)))(query)?;
-			Ok((input, ast::RelativeURI::Resource(ast::ResourcePath{segments: resource, options})))
+			let (input, options) = opt(preceded(tag("?"), |i| queryOptions_wip(i)))(query.clone())?;
+			Ok((input, ast::RelativeURI::Resource(ast::ResourcePath{resource: resource, options})))
 		},
 	))(input);
 }
@@ -214,46 +431,42 @@ fn odataRelativeUri<'a>(input: &'a str, ctx: &Parser, schema: &'a schema::Schema
 //*              / functionImportCallNoParens
 //*              / crossjoin
 //*              / '$all'                         [ "/" qualifiedEntityTypeName ]
-fn resourcePath<'a>(input: &'a str, ctx: &Parser, entity_container: &'a schema::EntityContainer) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn resourcePath<'a>(input: Input<'a>, entity_container: &'a schema::EntityContainer) -> ExprOutput<'a> {
 	return alt((
 		|i| {
-			let (i, entity_set) = entitySetName_wip(i, ctx, entity_container)?;
-			let (i, options) = opt(|i: &'a str| collectionNavigation_wip(i, ctx, &entity_set.kind))(i)?;
+			let (i, e) = expr(map(|i| entitySetName_wip(i, entity_container), ast::ExprKind::EntitySet))(i)?;
+			let a = Rc::new(e);
+			let (i, nav) = opt(|i| collectionNavigation_wip(i, &a))(i)?;
 
-			let mut path = vec![ast::PathSegment::EntitySet(entity_set)];
-			if let Some(mut options) = options {
-				path.append(&mut options);
-			}
-			Ok((i, path))
+			// Ok((i, nav.unwrap_or(e)))
+			unimplemented!()
 		},
-		value(vec![ast::PathSegment::Singleton], recognize(tuple((singletonEntity, opt(singleNavigation))))),
-		value(vec![ast::PathSegment::Action], actionImportCall),
-		value(vec![ast::PathSegment::Function], recognize(tuple((entityColFunctionImportCall, opt(collectionNavigation))))),
-		value(vec![ast::PathSegment::Function], recognize(tuple((entityFunctionImportCall, opt(singleNavigation))))),
-		value(vec![ast::PathSegment::Function], recognize(tuple((complexColFunctionImportCall, opt(complexColPath))))),
-		value(vec![ast::PathSegment::Function], recognize(tuple((complexFunctionImportCall, opt(complexPath))))),
-		value(vec![ast::PathSegment::Function], recognize(tuple((primitiveColFunctionImportCall, opt(primitiveColPath))))),
-		value(vec![ast::PathSegment::Function], recognize(tuple((primitiveFunctionImportCall, opt(primitivePath))))),
-		value(vec![ast::PathSegment::Function], functionImportCallNoParens),
-		value(vec![ast::PathSegment::Crossjoin], crossjoin),
-		value(vec![ast::PathSegment::All], recognize(tuple((tag("$all"), opt(tuple((tag("/"), qualifiedEntityTypeName))))))),
+		|i| {
+			unimplemented!()
+		}
+		// value(vec![ast::PathSegment::Singleton], recognize(tuple((singletonEntity, opt(singleNavigation))))),
+		// value(vec![ast::PathSegment::Action], actionImportCall),
+		// value(vec![ast::PathSegment::Function], recognize(tuple((entityColFunctionImportCall, opt(collectionNavigation))))),
+		// value(vec![ast::PathSegment::Function], recognize(tuple((entityFunctionImportCall, opt(singleNavigation))))),
+		// value(vec![ast::PathSegment::Function], recognize(tuple((complexColFunctionImportCall, opt(complexColPath))))),
+		// value(vec![ast::PathSegment::Function], recognize(tuple((complexFunctionImportCall, opt(complexPath))))),
+		// value(vec![ast::PathSegment::Function], recognize(tuple((primitiveColFunctionImportCall, opt(primitiveColPath))))),
+		// value(vec![ast::PathSegment::Function], recognize(tuple((primitiveFunctionImportCall, opt(primitivePath))))),
+		// value(vec![ast::PathSegment::Function], functionImportCallNoParens),
+		// value(vec![ast::PathSegment::Crossjoin], crossjoin),
+		// value(vec![ast::PathSegment::All], recognize(tuple((tag("$all"), opt(tuple((tag("/"), qualifiedEntityTypeName))))))),
 	))(input);
 }
 
 //*
 //* collectionNavigation = [ "/" qualifiedEntityTypeName ] [ collectionNavPath ]
-named!(collectionNavigation<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedEntityTypeName))), opt(collectionNavPath))))));
-fn collectionNavigation_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
-	let (input, cast) = opt(preceded(tag("/"), qualifiedEntityTypeName))(input)?;
-	let (input, path) = opt(|i| collectionNavPath_wip(i, ctx, kind))(input)?;
-	let mut result = vec![];
-	if let Some(cast) = cast {
-		result.push(ast::PathSegment::Cast);
-	}
-	if let Some(mut path) = path {
-		result.append(&mut path);
-	}
-	Ok((input, result))
+named!(collectionNavigation<Input, Input>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedEntityTypeName))), opt(collectionNavPath))))));
+fn collectionNavigation_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
+	let (input, cast) = opt(preceded(tag("/"), |i| qualifiedEntityTypeName_wip(i, child)))(input)?;
+	let b = cast.as_ref();
+	let (input, path) = opt(|i| collectionNavPath_wip(i, &b.unwrap_or(child)))(input)?;
+
+	Ok((input, path.or(cast).unwrap_or_else(|| Rc::clone(child))))
 }
 //* collectionNavPath    = keyPredicate [ singleNavigation ]
 //*                      / filterInPath [ collectionNavigation ]
@@ -265,115 +478,98 @@ fn collectionNavigation_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::
 //  errata: While in the ABNF the keyPredicate case appears first, we in fact have to do it last according
 //  to the precence rules defined here:
 //  http://docs.oasis-open.org/odata/odata/v4.01/cs01/part2-url-conventions/odata-v4.01-cs01-part2-url-conventions.html#sec_KeyasSegmentConvention
-named!(collectionNavPath<&str, &str>, call!(alt((recognize(tuple((keyPredicate, opt(singleNavigation))))
+named!(collectionNavPath<Input, Input>, call!(alt((recognize(tuple((keyPredicate, opt(singleNavigation))))
 					   , recognize(tuple((filterInPath, opt(collectionNavigation))))
 					   , recognize(tuple((each, opt(boundOperation))))
 					   , boundOperation
 					   , count
 					   , _ref
 					))));
-fn collectionNavPath_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn collectionNavPath_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
 	alt((
 		|i| {
-			let (i, filter) = filterInPath_wip(i)?;
-			let (i, path) = opt(|i| collectionNavigation_wip(i, ctx, kind))(i)?;
-			let mut result = vec![filter];
-			if let Some(mut path) = path {
-				result.append(&mut path);
-			}
-			Ok((i, result))
+			let (i, mut filter) = filterInPath_wip(i, child)?;
+			let (i, path) = opt(|i| collectionNavigation_wip(i, child))(i)?;
+
+			// if let Some(path) = path {
+			// 	filter = filter.chain(path);
+			// }
+			Ok((i, filter))
 		},
 		|i| {
-			let (input, (each, bound_op)) = tuple((each_wip, opt(|i| boundOperation_wip(i, ctx))))(i)?;
-			let mut result = vec![each];
-			if let Some(mut bound_op) = bound_op {
-				result.append(&mut bound_op);
-			}
+			let (input, mut each) = each_wip2(i, child)?;
+			let (input, bound_op) = opt(|i| boundOperation_wip2(i, child))(input)?;
 
-			Ok((input, result))
+			// if let Some(bound_op) = bound_op {
+			// 	each = each.chain(bound_op);
+			// }
+
+			Ok((input, each))
 		},
-		|i| boundOperation_wip(i, ctx),
-		map(count_wip, |s| vec![s]),
-		map(_ref_wip, |s| vec![s]),
+		|i| boundOperation_wip2(i, child),
+		|i| count_wip2(i, child),
+		|i| _ref_wip2(i, child),
 		|i| {
-			match &kind.key {
-				Some(key) => {
-					let (i, key) = keyPredicate_wip(i, ctx, &kind.properties, key)?;
-					let (i, path) = opt(|i| singleNavigation_wip(i, ctx, kind))(i)?;
+			let (i, key) = keyPredicate_wip(i, child)?;
+			// 	let (i, path) = opt(|i| singleNavigation_wip(i, kind))(i)?;
 
-					let mut result = vec![ast::PathSegment::KeyPredicate(key)];
-					if let Some(mut path) = path {
-						result.append(&mut path);
-					}
-					Ok((i, result))
-				},
-				//FIXME find a way to do proper error handling
-				None => Err(nom::Err::Error((i, nom::error::ErrorKind::Alt))),
-			}
+			// 	let mut result = vec![ast::PathSegment::KeyPredicate(key)];
+			// 	if let Some(mut path) = path {
+			// 		result.append(&mut path);
+			// 	}
+			Ok((i, key))
 		},
 	))(input)
 }
 
 //*
 //* keyPredicate     = simpleKey / compoundKey / keyPathSegments
-named!(keyPredicate<&str, &str>, call!(alt((simpleKey, compoundKey, keyPathSegments))));
-fn keyPredicate_wip<'a>(input: &'a str, ctx: &Parser, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<&'a str, ast::KeyPredicate<'a>> {
-	match key.len() {
-		0 => panic!(),
-		1 => {
-			alt((
-				|i| simpleKey_wip(i, ctx, props.get(&key[0]).unwrap()),
-				|i| compoundKey_wip(i, ctx, props, key),
-				|i| keyPathSegments_wip(i, ctx, props, key),
-			))(input)
-		}
-		_ => {
-			alt((
-				|i| compoundKey_wip(i, ctx, props, key),
-				|i| keyPathSegments_wip(i, ctx, props, key),
-			))(input)
-		}
-	}
+named!(keyPredicate<Input, Input>, call!(alt((simpleKey, compoundKey, keyPathSegments))));
+fn keyPredicate_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
+	unimplemented!()
 }
 //* simpleKey        = OPEN ( parameterAlias / keyPropertyValue ) CLOSE
-named!(simpleKey<&str, &str>, call!(recognize(tuple((OPEN, alt((parameterAlias, keyPropertyValue)), CLOSE)))));
-fn simpleKey_wip<'a>(input: &'a str, ctx: &Parser, key_property: &'a schema::property::Property) -> IResult<&'a str, ast::KeyPredicate<'a>> {
+named!(simpleKey<Input, Input>, call!(recognize(tuple((OPEN, alt((parameterAlias, keyPropertyValue)), CLOSE)))));
+fn simpleKey_wip<'a>(input: Input<'a>, key_property: &'a schema::property::Property) -> ExprOutput<'a> {
 	let value = alt((
-		map(|i| keyPropertyValue(i), ast::KeyValue::Value),
-		map(parameterAlias_wip, ast::KeyValue::ParameterAlias),
+		|i| keyPropertyValue_wip(i, key_property),
+		expr(map(parameterAlias_wip, |_| ast::ExprKind::Var(0))),
 	));
 
-	map(delimited(OPEN, value, CLOSE), |k| ast::KeyPredicate{values: vec![ast::KeyProperty{property: key_property, value: k}]})(input)
+	unimplemented!()
+	// expr(map(delimited(OPEN, value, CLOSE), move |k| ast::ExprKind::Binary(ast::BinOp::Eq, Rc::new(input.parser.expr(ast::ExprKind::Var(0))), Rc::new(k))))(input)
 }
 //* compoundKey      = OPEN keyValuePair *( COMMA keyValuePair ) CLOSE
-named!(compoundKey<&str, &str>, call!(recognize(tuple((OPEN, keyValuePair, many0(tuple((COMMA, keyValuePair))), CLOSE)))));
-fn compoundKey_wip<'a>(input: &'a str, ctx: &Parser, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<&'a str, ast::KeyPredicate<'a>> {
-	map(delimited(OPEN, separated_nonempty_list(COMMA, |i| keyValuePair_wip(i, ctx, props, key)), CLOSE), |v| ast::KeyPredicate{values: v})(input)
+named!(compoundKey<Input, Input>, call!(recognize(tuple((OPEN, keyValuePair, many0(tuple((COMMA, keyValuePair))), CLOSE)))));
+fn compoundKey_wip<'a>(input: Input<'a>, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<Input<'a>, ast::KeyPredicate<'a>> {
+	unimplemented!()
+	// map(delimited(OPEN, separated_nonempty_list(COMMA, |i| keyValuePair_wip(i, props, key)), CLOSE), |v| ast::KeyPredicate{values: v})(input)
 }
 
 //* keyValuePair     = ( primitiveKeyProperty / keyPropertyAlias  ) EQ ( parameterAlias / keyPropertyValue )
-named!(keyValuePair<&str, &str>, call!(recognize(tuple((alt((primitiveKeyProperty, keyPropertyAlias)), EQ, alt((parameterAlias, keyPropertyValue)))))));
-fn keyValuePair_wip<'a>(input: &'a str, ctx: &Parser, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<&'a str, ast::KeyProperty<'a>> {
-	let (input, property) = map_opt(alt((primitiveKeyProperty, keyPropertyAlias)), |n| props.get(n))(input)?;
-	let (input, value) = preceded(EQ, alt((map(parameterAlias_wip, ast::KeyValue::ParameterAlias), |i| keyPropertyValue_wip(i, ctx, property))))(input)?;
+named!(keyValuePair<Input, Input>, call!(recognize(tuple((alt((primitiveKeyProperty, keyPropertyAlias)), EQ, alt((parameterAlias, keyPropertyValue)))))));
+fn keyValuePair_wip<'a>(input: Input<'a>, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<Input<'a>, ast::KeyProperty<'a>> {
+	unimplemented!()
+	// let (input, property) = map_opt(alt((primitiveKeyProperty, keyPropertyAlias)), |n| props.get(n))(input)?;
+	// let (input, value) = preceded(EQ, alt((map(parameterAlias_wip, ast::KeyValue::ParameterAlias), |i| keyPropertyValue_wip(i, property))))(input)?;
 
-	Ok((input, ast::KeyProperty{property, value}))
+	// Ok((input, ast::KeyProperty{property, value}))
 }
 //* keyPropertyValue = primitiveLiteral
-named!(keyPropertyValue<&str, &str>, call!(recognize(primitiveLiteral)));
+named!(keyPropertyValue<Input, Input>, call!(recognize(primitiveLiteral)));
 // FIXME validate the primitive against the property type
-fn keyPropertyValue_wip<'a>(input: &'a str, ctx: &Parser, property: &'a schema::property::Property) -> IResult<&'a str, ast::KeyValue<'a>> {
-	map(primitiveLiteral, ast::KeyValue::Value)(input)
+fn keyPropertyValue_wip<'a>(input: Input<'a>, property: &'a schema::property::Property) -> ExprOutput<'a> {
+	expr(map(|i| primitiveLiteral_wip(i), ast::ExprKind::Lit))(input)
 }
 //* keyPropertyAlias = odataIdentifier
-named!(keyPropertyAlias<&str, &str>, call!(recognize(odataIdentifier)));
+named!(keyPropertyAlias<Input, Input>, call!(recognize(odataIdentifier)));
 //* keyPathSegments  = 1*( "/" keyPathLiteral )
-named!(keyPathSegments<&str, &str>, call!(recognize(many1(tuple((tag("/"), keyPathLiteral))))));
-fn keyPathSegments_wip<'a>(mut input: &'a str, ctx: &Parser, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<&'a str, ast::KeyPredicate<'a>> {
+named!(keyPathSegments<Input, Input>, call!(recognize(many1(tuple((tag("/"), keyPathLiteral))))));
+fn keyPathSegments_wip<'a>(mut input: Input<'a>, props: &'a HashMap<schema::Identifier, schema::property::Property>, key: &[schema::Identifier]) -> IResult<Input<'a>, ast::KeyPredicate<'a>> {
 	let mut result = vec![];
 
 	for name in key {
-		let (i, value) = preceded(tag("/"), |i| keyPathLiteral_wip(i, ctx, props.get(name).unwrap()))(input)?;
+		let (i, value) = preceded(tag("/"), |i| keyPathLiteral_wip(i, props.get(name).unwrap()))(input)?;
 		input = i;
 
 		result.push(value);
@@ -384,9 +580,9 @@ fn keyPathSegments_wip<'a>(mut input: &'a str, ctx: &Parser, props: &'a HashMap<
 //* keyPathLiteral   = *pchar
 // FIXME This rule is overly generic. It should be matching the primitive value that the particular
 // property has
-named!(keyPathLiteral<&str, &str>, call!(recognize(many0(pchar))));
-fn keyPathLiteral_wip<'a>(input: &'a str, ctx: &Parser, property: &'a schema::property::Property) -> IResult<&'a str, ast::KeyProperty<'a>> {
-	map(recognize(many0(pchar)), |n| ast::KeyProperty{property, value: ast::KeyValue::Value(n)})(input)
+named!(keyPathLiteral<Input, Input>, call!(recognize(many0(pchar))));
+fn keyPathLiteral_wip<'a>(input: Input<'a>, property: &'a schema::property::Property) -> IResult<Input<'a>, ast::KeyProperty<'a>> {
+	map(recognize(many0(pchar)), |n: Input| ast::KeyProperty{property, value: ast::KeyValue::Value(n.data)})(input)
 }
 //*
 //* singleNavigation = [ "/" qualifiedEntityTypeName ]
@@ -395,17 +591,17 @@ fn keyPathLiteral_wip<'a>(input: &'a str, ctx: &Parser, property: &'a schema::pr
 //*                    / ref
 //*                    / value  ; request the media resource of a media entity
 //*                    ]
-named!(singleNavigation<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedEntityTypeName))), opt(alt((recognize(tuple((tag("/"), propertyPath)))
+named!(singleNavigation<Input, Input>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedEntityTypeName))), opt(alt((recognize(tuple((tag("/"), propertyPath)))
 														   , boundOperation
 														   , _ref
 														   , _value
 														   ))))))));
-fn singleNavigation_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Entity) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn singleNavigation_wip<'a>(input: Input<'a>, kind: &'a schema::kind::Entity) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
 	//FIXME
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedEntityTypeName)))(input)?;
 	let (input, path) = opt(alt((
-		preceded(tag("/"), |i| propertyPath_wip(i, ctx, &kind.properties)),
-		|i| boundOperation_wip(i, ctx),
+		preceded(tag("/"), |i| propertyPath_wip(i, &kind.properties)),
+		|i| boundOperation_wip(i),
 		map(_ref_wip, |s| vec![s]),
 		map(_value_wip, |s| vec![s]),
 	)))(input)?;
@@ -428,7 +624,7 @@ fn singleNavigation_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind
 //*              / primitiveColProperty        [ primitiveColPath ]
 //*              / primitiveProperty           [ primitivePath ]
 //*              / streamProperty              [ boundOperation ]
-named!(propertyPath<&str, &str>, call!(recognize(alt((tuple((entityColNavigationProperty, opt(collectionNavigation)))
+named!(propertyPath<Input, Input>, call!(recognize(alt((tuple((entityColNavigationProperty, opt(collectionNavigation)))
 						 , tuple((entityNavigationProperty, opt(singleNavigation)))
 						 , tuple((complexColProperty, opt(complexColPath)))
 						 , tuple((complexProperty, opt(complexPath)))
@@ -436,22 +632,22 @@ named!(propertyPath<&str, &str>, call!(recognize(alt((tuple((entityColNavigation
 						 , tuple((primitiveProperty, opt(primitivePath)))
 						 , tuple((streamProperty, opt(boundOperation)))
 						 )))));
-fn propertyPath_wip<'a>(input: &'a str, ctx: &Parser, properties: &'a HashMap<schema::Identifier, schema::property::Property>) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn propertyPath_wip<'a>(input: Input<'a>, properties: &'a HashMap<schema::Identifier, schema::property::Property>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
 	use schema::kind;
 	use schema::property::*;
 
-	let (input, property) = map_opt(odataIdentifier, |name| properties.get(name))(input)?;
+	let (input, property) = map_opt(odataIdentifier, |name| properties.get(name.data))(input)?;
 
 	let (input, path) = match property {
-		Property::Navigation(Navigation{kind, collection: true, ..}) => opt(|i| collectionNavigation_wip(i, ctx, kind))(input)?,
-		Property::Navigation(Navigation{kind, collection: false, ..}) => opt(|i| singleNavigation_wip(i, ctx, kind))(input)?,
-		Property::Structural(Structural{kind: Type::Complex(kind), collection: true, ..}) => opt(|i| complexColPath_wip(i, ctx, kind))(input)?,
-		Property::Structural(Structural{kind: Type::Complex(kind), collection: false, ..}) => opt(|i| complexPath_wip(i, ctx, kind))(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(kind::Primitive::Stream), ..}) => opt(|i| boundOperation_wip(i, ctx))(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i, ctx))(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(_), collection: false, ..}) => opt(|i| primitivePath_wip(i, ctx))(input)?,
-		Property::Structural(Structural{kind: Type::Enumeration(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i, ctx))(input)?,
-		Property::Structural(Structural{kind: Type::Enumeration(_), collection: false, ..}) => opt(|i| primitivePath_wip(i, ctx))(input)?,
+		Property::Navigation(Navigation{kind, collection: true, ..}) => unimplemented!(), //opt(|i| collectionNavigation_wip(i, kind))(input)?,
+		Property::Navigation(Navigation{kind, collection: false, ..}) => opt(|i| singleNavigation_wip(i, kind))(input)?,
+		Property::Structural(Structural{kind: Type::Complex(kind), collection: true, ..}) => opt(|i| complexColPath_wip(i, kind))(input)?,
+		Property::Structural(Structural{kind: Type::Complex(kind), collection: false, ..}) => opt(|i| complexPath_wip(i, kind))(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(kind::Primitive::Stream), ..}) => opt(|i| boundOperation_wip(i))(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i))(input)?,
+		Property::Structural(Structural{kind: Type::Primitive(_), collection: false, ..}) => opt(|i| primitivePath_wip(i))(input)?,
+		Property::Structural(Structural{kind: Type::Enumeration(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i))(input)?,
+		Property::Structural(Structural{kind: Type::Enumeration(_), collection: false, ..}) => opt(|i| primitivePath_wip(i))(input)?,
 	};
 
 	let mut result = vec![ast::PathSegment::Property(property)];
@@ -464,22 +660,22 @@ fn propertyPath_wip<'a>(input: &'a str, ctx: &Parser, properties: &'a HashMap<sc
 
 //*
 //* primitiveColPath = count / boundOperation / ordinalIndex
-named!(primitiveColPath<&str, &str>, call!(alt((count, boundOperation, ordinalIndex))));
-fn primitiveColPath_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+named!(primitiveColPath<Input, Input>, call!(alt((count, boundOperation, ordinalIndex))));
+fn primitiveColPath_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
 	alt((
 		map(count_wip, |c| vec![c]),
-		|i| boundOperation_wip(i, ctx),
-		map(|i| ordinalIndex_wip(i, ctx), |index| vec![index]),
+		|i| boundOperation_wip(i),
+		map(|i| ordinalIndex_wip(i), |index| vec![index]),
 	))(input)
 }
 
 //*
 //* primitivePath  = value / boundOperation
-named!(primitivePath<&str, &str>, call!(alt((_value, boundOperation))));
-fn primitivePath_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+named!(primitivePath<Input, Input>, call!(alt((_value, boundOperation))));
+fn primitivePath_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
 	alt((
 		map(_value_wip, |c| vec![c]),
-		|i| boundOperation_wip(i, ctx)
+		|i| boundOperation_wip(i)
 	))(input)
 }
 //*
@@ -487,13 +683,13 @@ fn primitivePath_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, Vec<a
 //*                / [ "/" qualifiedComplexTypeName ] [ count / boundOperation ]
 //  errata: The ABNF doesn't allow selecting a specific element and then continuing with a complexPath
 //  rule. Is this a mistake?
-named!(complexColPath<&str, &str>, call!(alt((ordinalIndex, recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((count, boundOperation))))))))));
-fn complexColPath_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Complex) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+named!(complexColPath<Input, Input>, call!(alt((ordinalIndex, recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((count, boundOperation))))))))));
+fn complexColPath_wip<'a>(input: Input<'a>, kind: &'a schema::kind::Complex) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
 	alt((
-		map(|i| ordinalIndex_wip(i, ctx), |index| vec![index]),
+		map(|i| ordinalIndex_wip(i), |index| vec![index]),
 		|input| {
 			let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedComplexTypeName)))(input)?;
-			let (input, path) = opt(alt((map(count_wip, |s| vec![s]), |i| boundOperation_wip(i, ctx))))(input)?;
+			let (input, path) = opt(alt((map(count_wip, |s| vec![s]), |i| boundOperation_wip(i))))(input)?;
 
 			let mut result = vec![];
 			if let Some(cast) = cast {
@@ -511,12 +707,12 @@ fn complexColPath_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::
 //*                  [ "/" propertyPath
 //*                  / boundOperation
 //*                  ]
-named!(complexPath<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((recognize(tuple((tag("/"), propertyPath))), boundOperation))))))));
-fn complexPath_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Complex) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+named!(complexPath<Input, Input>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((recognize(tuple((tag("/"), propertyPath))), boundOperation))))))));
+fn complexPath_wip<'a>(input: Input<'a>, kind: &'a schema::kind::Complex) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedComplexTypeName)))(input)?;
 	let (input, path) = opt(alt((
-		preceded(tag("/"), |i| propertyPath_wip(i, ctx, &kind.properties)),
-		|i| boundOperation_wip(i, ctx),
+		preceded(tag("/"), |i| propertyPath_wip(i, &kind.properties)),
+		|i| boundOperation_wip(i),
 	)))(input)?;
 
 	let mut result = vec![];
@@ -530,29 +726,79 @@ fn complexPath_wip<'a>(input: &'a str, ctx: &Parser, kind: &'a schema::kind::Com
 }
 //*
 //* filterInPath = '/$filter' EQ parameterAlias
-named!(filterInPath<&str, &str>, call!(recognize(tuple((tag("/$filter"), EQ, parameterAlias)))));
-named!(filterInPath_wip<&str, ast::PathSegment>, call!(map(preceded(tuple((tag("/$filter"), EQ)), parameterAlias_wip), |p| ast::PathSegment::Filter(p))));
+named!(filterInPath<Input, Input>, call!(recognize(tuple((tag("/$filter"), EQ, parameterAlias)))));
+fn filterInPath_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
+	let (input, alias) = preceded(tuple((tag("/$filter"), EQ)), |i| parameterAlias_wip2(i))(input)?;
+
+	unimplemented!()
+	// Ok((
+	// 	input,
+	// 	DeferredExpr{
+	// 		ty: in_ty,
+	// 		link: Box::new(move |child| Rc::new(input.parser.expr(ast::ExprKind::Filter(child, Rc::new(alias))))),
+	// 	},
+	// ))
+}
 //*
 //* each  = '/$each'
-named!(each<&str, &str>, call!(tag("/$each")));
-named!(each_wip<&str, ast::PathSegment>, call!(value(ast::PathSegment::Each, tag("/$each"))));
+named!(each<Input, Input>, call!(tag("/$each")));
+named!(each_wip<Input, ast::PathSegment>, call!(value(ast::PathSegment::Each, tag("/$each"))));
+fn each_wip2<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
+	let (input, _) = tag("/$each")(input)?;
+	//FIXME typecheck that input type is a collection
+	unimplemented!()
+	// Ok((
+	// 	input,
+	// 	DeferredExpr{
+	// 		ty: in_ty,
+	// 		link: Box::new(move |child| Rc::new(input.parser.expr(ast::ExprKind::Each(child)))),
+	// 	}
+	// ))
+}
 //* count = '/$count'
-named!(count<&str, &str>, call!(tag("/$count")));
-named!(count_wip<&str, ast::PathSegment>, call!(value(ast::PathSegment::Count, tag("/$count"))));
+named!(count<Input, Input>, call!(tag("/$count")));
+named!(count_wip<Input, ast::PathSegment>, call!(value(ast::PathSegment::Count, tag("/$count"))));
+fn count_wip2<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
+	let (input, _) = tag("/$count")(input)?;
+	//FIXME typecheck that input type is a collection
+	unimplemented!()
+	// Ok((
+	// 	input,
+	// 	DeferredExpr{
+	// 		ty: ast::Ty::Primitive(schema::kind::Primitive::Int32),
+	// 		link: Box::new(move |child| Rc::new(input.parser.expr(ast::ExprKind::Count(child)))),
+	// 	}
+	// ))
+}
+fn count_wip3<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
+	expr(value(ExprKind::Count(Rc::clone(child)), tag("/$count")))(input)
+}
 //* ref   = '/$ref'
-named!(_ref<&str, &str>, call!(tag("/$ref")));
-named!(_ref_wip<&str, ast::PathSegment>, call!(value(ast::PathSegment::Ref, tag("/$ref"))));
+named!(_ref<Input, Input>, call!(tag("/$ref")));
+named!(_ref_wip<Input, ast::PathSegment>, call!(value(ast::PathSegment::Ref, tag("/$ref"))));
+fn _ref_wip2<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
+	let (input, _) = tag("/$ref")(input)?;
+	//FIXME typecheck that input type is a collection
+	unimplemented!()
+	// Ok((
+	// 	input,
+	// 	DeferredExpr{
+	// 		ty: in_ty,
+	// 		link: Box::new(move |child| Rc::new(input.parser.expr(ast::ExprKind::Ref(child)))),
+	// 	}
+	// ))
+}
 //* value = '/$value'
-named!(_value<&str, &str>, call!(tag("/$value")));
-named!(_value_wip<&str, ast::PathSegment>, call!(value(ast::PathSegment::Value, tag("/$value"))));
+named!(_value<Input, Input>, call!(tag("/$value")));
+named!(_value_wip<Input, ast::PathSegment>, call!(value(ast::PathSegment::Value, tag("/$value"))));
 //*
 //* ordinalIndex = "/" 1*DIGIT
 //  errata: Even though the ABNF encodes only positive integers, the OData spec defines negative ordinal
 //  indices too. See:
 //  http://docs.oasis-open.org/odata/odata/v4.01/cs01/part1-protocol/odata-v4.01-cs01-part1-protocol.html#sec_RequestinganIndividualMemberofanOrde
-named!(ordinalIndex<&str, &str>, call!(recognize(tuple((tag("/"), many1(DIGIT))))));
-fn ordinalIndex_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::PathSegment<'a>> {
-	map(preceded(tag("/"), map_res(recognize(tuple((opt(tag("-")), digit1))), |n: &str| n.parse())), ast::PathSegment::OrdinalIndex)(input)
+named!(ordinalIndex<Input, Input>, call!(recognize(tuple((tag("/"), many1(DIGIT))))));
+fn ordinalIndex_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::PathSegment<'a>> {
+	map(preceded(tag("/"), map_res(recognize(tuple((opt(tag("-")), digit1))), |n: Input| n.data.parse())), ast::PathSegment::OrdinalIndex)(input)
 }
 //*
 //* ; boundOperation segments can only be composed if the type of the previous segment
@@ -567,7 +813,7 @@ fn ordinalIndex_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::P
 //*                      / boundPrimitiveFunctionCall    [ primitivePath ]
 //*                      / boundFunctionCallNoParens
 //*                      )
-named!(boundOperation<&str, &str>, call!(recognize(tuple((tag("/"), alt((boundActionCall
+named!(boundOperation<Input, Input>, call!(recognize(tuple((tag("/"), alt((boundActionCall
 								     , recognize(tuple((boundEntityColFunctionCall, opt(collectionNavigation))))
 								     , recognize(tuple((boundEntityFunctionCall, opt(singleNavigation))))
 								     , recognize(tuple((boundComplexColFunctionCall, opt(complexColPath))))
@@ -576,17 +822,21 @@ named!(boundOperation<&str, &str>, call!(recognize(tuple((tag("/"), alt((boundAc
 								     , recognize(tuple((boundPrimitiveFunctionCall, opt(primitivePath))))
 								     , boundFunctionCallNoParens
 								     )))))));
-fn boundOperation_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, Vec<ast::PathSegment<'a>>> {
+fn boundOperation_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
 	// FIXME
 	value(vec![], boundOperation)(input)
 }
+fn boundOperation_wip2<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
+	// FIXME
+	Err(nom::Err::Error((input, nom::error::ErrorKind::Alt)))
+}
 //*
 //* actionImportCall = actionImport
-named!(actionImportCall<&str, &str>, call!(recognize(actionImport)));
+named!(actionImportCall<Input, Input>, call!(recognize(actionImport)));
 //* boundActionCall  = namespace "." action
 //*                    ; with the added restriction that the binding parameter MUST be either an entity or collection of entities
 //*                    ; and is specified by reference using the URI immediately preceding (to the left) of the boundActionCall
-named!(boundActionCall<&str, &str>, call!(recognize(tuple((namespace, tag("."), action)))));
+named!(boundActionCall<Input, Input>, call!(recognize(tuple((namespace, tag("."), action)))));
 //*
 //* ; The following boundXxxFunctionCall rules have the added restrictions that
 //* ;  - the function MUST support binding, and
@@ -595,17 +845,17 @@ named!(boundActionCall<&str, &str>, call!(recognize(tuple((namespace, tag("."), 
 //* ;  - the functionParameters MUST NOT include the bindingParameter.
 //TODO(validate)
 //* boundEntityFunctionCall       = namespace "." entityFunction       functionParameters
-named!(boundEntityFunctionCall<&str, &str>, call!(recognize(tuple((entityFunction, functionParameters)))));
+named!(boundEntityFunctionCall<Input, Input>, call!(recognize(tuple((entityFunction, functionParameters)))));
 //* boundEntityColFunctionCall    = namespace "." entityColFunction    functionParameters
-named!(boundEntityColFunctionCall<&str, &str>, call!(recognize(tuple((entityColFunction, functionParameters)))));
+named!(boundEntityColFunctionCall<Input, Input>, call!(recognize(tuple((entityColFunction, functionParameters)))));
 //* boundComplexFunctionCall      = namespace "." complexFunction      functionParameters
-named!(boundComplexFunctionCall<&str, &str>, call!(recognize(tuple((complexFunction, functionParameters)))));
+named!(boundComplexFunctionCall<Input, Input>, call!(recognize(tuple((complexFunction, functionParameters)))));
 //* boundComplexColFunctionCall   = namespace "." complexColFunction   functionParameters
-named!(boundComplexColFunctionCall<&str, &str>, call!(recognize(tuple((complexColFunction, functionParameters)))));
+named!(boundComplexColFunctionCall<Input, Input>, call!(recognize(tuple((complexColFunction, functionParameters)))));
 //* boundPrimitiveFunctionCall    = namespace "." primitiveFunction    functionParameters
-named!(boundPrimitiveFunctionCall<&str, &str>, call!(recognize(tuple((primitiveFunction, functionParameters)))));
+named!(boundPrimitiveFunctionCall<Input, Input>, call!(recognize(tuple((primitiveFunction, functionParameters)))));
 //* boundPrimitiveColFunctionCall = namespace "." primitiveColFunction functionParameters
-named!(boundPrimitiveColFunctionCall<&str, &str>, call!(recognize(tuple((primitiveColFunction, functionParameters)))));
+named!(boundPrimitiveColFunctionCall<Input, Input>, call!(recognize(tuple((primitiveColFunction, functionParameters)))));
 //*
 //* boundFunctionCallNoParens     = namespace "." entityFunction
 //*                               / namespace "." entityColFunction
@@ -613,7 +863,7 @@ named!(boundPrimitiveColFunctionCall<&str, &str>, call!(recognize(tuple((primiti
 //*                               / namespace "." complexColFunction
 //*                               / namespace "." primitiveFunction
 //*                               / namespace "." primitiveColFunction
-named!(boundFunctionCallNoParens<&str, &str>, call!(recognize(alt((tuple((namespace, tag("."), entityFunction))
+named!(boundFunctionCallNoParens<Input, Input>, call!(recognize(alt((tuple((namespace, tag("."), entityFunction))
 							      , tuple((namespace, tag("."), entityColFunction))
 						   	      , tuple((namespace, tag("."), complexFunction))
 						   	      , tuple((namespace, tag("."), complexColFunction))
@@ -623,17 +873,17 @@ named!(boundFunctionCallNoParens<&str, &str>, call!(recognize(alt((tuple((namesp
 
 //*
 //* entityFunctionImportCall       = entityFunctionImport       functionParameters
-named!(entityFunctionImportCall<&str, &str>, call!(recognize(tuple((entityFunctionImport,functionParameters)))));
+named!(entityFunctionImportCall<Input, Input>, call!(recognize(tuple((entityFunctionImport,functionParameters)))));
 //* entityColFunctionImportCall    = entityColFunctionImport    functionParameters
-named!(entityColFunctionImportCall<&str, &str>, call!(recognize(tuple((entityColFunctionImport,functionParameters)))));
+named!(entityColFunctionImportCall<Input, Input>, call!(recognize(tuple((entityColFunctionImport,functionParameters)))));
 //* complexFunctionImportCall      = complexFunctionImport      functionParameters
-named!(complexFunctionImportCall<&str, &str>, call!(recognize(tuple((complexFunctionImport,functionParameters)))));
+named!(complexFunctionImportCall<Input, Input>, call!(recognize(tuple((complexFunctionImport,functionParameters)))));
 //* complexColFunctionImportCall   = complexColFunctionImport   functionParameters
-named!(complexColFunctionImportCall<&str, &str>, call!(recognize(tuple((complexColFunctionImport,functionParameters)))));
+named!(complexColFunctionImportCall<Input, Input>, call!(recognize(tuple((complexColFunctionImport,functionParameters)))));
 //* primitiveFunctionImportCall    = primitiveFunctionImport    functionParameters
-named!(primitiveFunctionImportCall<&str, &str>, call!(recognize(tuple((primitiveFunctionImport,functionParameters)))));
+named!(primitiveFunctionImportCall<Input, Input>, call!(recognize(tuple((primitiveFunctionImport,functionParameters)))));
 //* primitiveColFunctionImportCall = primitiveColFunctionImport functionParameters
-named!(primitiveColFunctionImportCall<&str, &str>, call!(recognize(tuple((primitiveColFunctionImport,functionParameters)))));
+named!(primitiveColFunctionImportCall<Input, Input>, call!(recognize(tuple((primitiveColFunctionImport,functionParameters)))));
 //*
 //* functionImportCallNoParens     = entityFunctionImport
 //*                                / entityColFunctionImport
@@ -641,7 +891,7 @@ named!(primitiveColFunctionImportCall<&str, &str>, call!(recognize(tuple((primit
 //*                                / complexColFunctionImport
 //*                                / primitiveFunctionImport
 //*                                / primitiveColFunctionImport
-named!(functionImportCallNoParens<&str, &str>, call!(alt((entityFunctionImport
+named!(functionImportCallNoParens<Input, Input>, call!(alt((entityFunctionImport
 						    , entityColFunctionImport
 						    , complexFunctionImport
 						    , complexColFunctionImport
@@ -649,19 +899,23 @@ named!(functionImportCallNoParens<&str, &str>, call!(alt((entityFunctionImport
 						    , primitiveColFunctionImport))));
 //*
 //* functionParameters = OPEN [ functionParameter *( COMMA functionParameter ) ] CLOSE
-named!(functionParameters<&str, &str>, call!(recognize(tuple((OPEN, opt(tuple((functionParameter, many0(tuple((COMMA, functionParameter)))))), CLOSE)))));
+named!(functionParameters<Input, Input>, call!(recognize(tuple((OPEN, opt(tuple((functionParameter, many0(tuple((COMMA, functionParameter)))))), CLOSE)))));
 //* functionParameter  = parameterName EQ ( parameterAlias / primitiveLiteral )
-named!(functionParameter<&str, &str>, call!(recognize(tuple((parameterName, EQ, alt((parameterAlias, primitiveLiteral)))))));
+named!(functionParameter<Input, Input>, call!(recognize(tuple((parameterName, EQ, alt((parameterAlias, primitiveLiteral)))))));
 //* parameterName      = odataIdentifier
-named!(parameterName<&str, &str>, call!(recognize(odataIdentifier)));
+named!(parameterName<Input, Input>, call!(recognize(odataIdentifier)));
 //* parameterAlias     = AT odataIdentifier
-named!(parameterAlias<&str, &str>, call!(preceded(AT, odataIdentifier)));
-named!(parameterAlias_wip<&str, ast::ParameterAlias>, call!(map(preceded(AT, odataIdentifier), |name| ast::ParameterAlias{name})));
+named!(parameterAlias<Input, Input>, call!(preceded(AT, odataIdentifier)));
+named!(parameterAlias_wip<Input, ast::ParameterAlias>, call!(map(preceded(AT, odataIdentifier), |name| ast::ParameterAlias{name: name.data})));
+fn parameterAlias_wip2<'a>(input: Input<'a>) -> ExprOutput<'a> {
+	// FIXME resolve scope and assign proper nodeid
+	expr(map(preceded(AT, odataIdentifier), |name| ast::ExprKind::Var(0)))(input)
+}
 //*
 //* crossjoin = '$crossjoin' OPEN
 //*             entitySetName *( COMMA entitySetName )
 //*             CLOSE
-named!(crossjoin<&str, &str>, call!(recognize(tuple((tag("$crossjoin"), OPEN, entitySetName, many0(tuple((COMMA, entitySetName))), CLOSE)))));
+named!(crossjoin<Input, Input>, call!(recognize(tuple((tag("$crossjoin"), OPEN, entitySetName, many0(tuple((COMMA, entitySetName))), CLOSE)))));
 //*
 //*
 //* ;------------------------------------------------------------------------------
@@ -669,18 +923,18 @@ named!(crossjoin<&str, &str>, call!(recognize(tuple((tag("$crossjoin"), OPEN, en
 //* ;------------------------------------------------------------------------------
 //*
 //* queryOptions = queryOption *( "&" queryOption )
-named!(queryOptions<&str, &str>, call!(recognize(tuple((queryOption, many0(tuple((tag("&"), queryOption))))))));
-fn queryOptions_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, Vec<ast::QueryOption<'a>>> {
-	separated_nonempty_list(tag("&"), |i| queryOption_wip(i, ctx))(input)
+named!(queryOptions<Input, Input>, call!(recognize(tuple((queryOption, many0(tuple((tag("&"), queryOption))))))));
+fn queryOptions_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::QueryOption<'a>>> {
+	separated_nonempty_list(tag("&"), |i| queryOption_wip(i))(input)
 }
 //* queryOption  = systemQueryOption
 //*              / aliasAndValue
 //*              / nameAndValue
 //*              / customQueryOption
-named!(queryOption<&str, &str>, call!(alt((systemQueryOption, aliasAndValue, nameAndValue, customQueryOption))));
-fn queryOption_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::QueryOption<'a>> {
+named!(queryOption<Input, Input>, call!(alt((systemQueryOption, aliasAndValue, nameAndValue, customQueryOption))));
+fn queryOption_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::QueryOption<'a>> {
 	alt((
-		|i| systemQueryOption_wip(i, ctx),
+		|i| systemQueryOption_wip(i),
 		value(ast::QueryOption::Alias, aliasAndValue),
 		value(ast::QueryOption::Name, nameAndValue),
 		customQueryOption_wip,
@@ -688,31 +942,31 @@ fn queryOption_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Qu
 }
 //*
 //* batchOptions = batchOption *( "&" batchOption )
-named!(batchOptions<&str, Vec<ast::QueryOption>>, call!(separated_nonempty_list(tag("&"), batchOption)));
+named!(batchOptions<Input, Vec<ast::QueryOption>>, call!(separated_nonempty_list(tag("&"), batchOption)));
 //* batchOption  = format
 //*              /customQueryOption
-named!(batchOption<&str, ast::QueryOption>, call!(alt((format_wip, customQueryOption_wip))));
+named!(batchOption<Input, ast::QueryOption>, call!(alt((format_wip, customQueryOption_wip))));
 //*
 //* metadataOptions = metadataOption *( "&" metadataOption )
-named!(metadataOptions<&str, &str>, call!(recognize(tuple((metadataOption, many0(tuple((tag("&"), metadataOption))))))));
+named!(metadataOptions<Input, Input>, call!(recognize(tuple((metadataOption, many0(tuple((tag("&"), metadataOption))))))));
 //* metadataOption  = format
 //*                 /customQueryOption
-named!(metadataOption<&str, &str>, call!(alt((format, customQueryOption))));
+named!(metadataOption<Input, Input>, call!(alt((format, customQueryOption))));
 //*
 //* entityOptions  = *( entityIdOption "&" ) id *( "&" entityIdOption )
-named!(entityOptions<&str, &str>, call!(recognize(tuple((many0(tuple((entityIdOption, tag("&")))), id, many0(tuple((tag("&"), entityIdOption))))))));
+named!(entityOptions<Input, Input>, call!(recognize(tuple((many0(tuple((entityIdOption, tag("&")))), id, many0(tuple((tag("&"), entityIdOption))))))));
 //* entityIdOption = format
 //*                / customQueryOption
-named!(entityIdOption<&str, &str>, call!(alt((format, customQueryOption))));
+named!(entityIdOption<Input, Input>, call!(alt((format, customQueryOption))));
 //* entityCastOptions = *( entityCastOption "&" ) id *( "&" entityCastOption )
-named!(entityCastOptions<&str, &str>, call!(recognize(tuple((many0(tuple((entityCastOption, tag("&")))), id, many0(tuple((tag("&"), entityCastOption))))))));
+named!(entityCastOptions<Input, Input>, call!(recognize(tuple((many0(tuple((entityCastOption, tag("&")))), id, many0(tuple((tag("&"), entityCastOption))))))));
 //* entityCastOption  = entityIdOption
 //*                   / expand
 //*                   / select
-named!(entityCastOption<&str, &str>, call!(alt((entityIdOption, expand, select))));
+named!(entityCastOption<Input, Input>, call!(alt((entityIdOption, expand, select))));
 //*
 //* id = ( "$id" / "id" ) EQ IRI-in-query
-named!(id<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$id"), tag_no_case("id"))), EQ, IRI_in_query)))));
+named!(id<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$id"), tag_no_case("id"))), EQ, IRI_in_query)))));
 //*
 //* systemQueryOption = compute
 //*                   / deltatoken
@@ -729,7 +983,7 @@ named!(id<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$id"), tag_no_ca
 //*                   / skiptoken
 //*                   / top
 //*                   / index
-named!(systemQueryOption<&str, &str>, call!(alt((compute
+named!(systemQueryOption<Input, Input>, call!(alt((compute
 					   , deltatoken
 					   , expand
 					   , filter
@@ -744,12 +998,12 @@ named!(systemQueryOption<&str, &str>, call!(alt((compute
 					   , skiptoken
 					   , top
 					   , index))));
-fn systemQueryOption_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::QueryOption<'a>> {
+fn systemQueryOption_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::QueryOption<'a>> {
 	alt((
 		value(ast::QueryOption::Compute, compute),
 		value(ast::QueryOption::DeltaToken, deltatoken),
 		value(ast::QueryOption::Expand, expand),
-		|i| filter_wip(i, ctx),
+		|i| filter_wip(i),
 		format_wip,
 		value(ast::QueryOption::Id, id),
 		value(ast::QueryOption::InlineCount, inlinecount),
@@ -766,14 +1020,14 @@ fn systemQueryOption_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, a
 
 //*
 //* compute          = ( "$compute" / "compute" ) EQ computeItem *( COMMA computeItem )
-named!(compute<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$compute"), tag_no_case("compute"))), EQ, computeItem, many0(tuple((COMMA, computeItem))))))));
+named!(compute<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$compute"), tag_no_case("compute"))), EQ, computeItem, many0(tuple((COMMA, computeItem))))))));
 //* computeItem      = commonExpr RWS "as" RWS computedProperty
-named!(computeItem<&str, &str>, call!(recognize(tuple((commonExpr, RWS, tag_no_case("as"), RWS, computedProperty)))));
+named!(computeItem<Input, Input>, call!(recognize(tuple((commonExpr, RWS, tag_no_case("as"), RWS, computedProperty)))));
 //* computedProperty = odataIdentifier
-named!(computedProperty<&str, &str>, call!(recognize(odataIdentifier)));
+named!(computedProperty<Input, Input>, call!(recognize(odataIdentifier)));
 //*
 //* expand            = ( "$expand" / "expand" ) EQ expandItem *( COMMA expandItem )
-named!(expand<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$expand"), tag_no_case("expand"))), EQ, expandItem, many0(tuple((COMMA, expandItem))))))));
+named!(expand<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$expand"), tag_no_case("expand"))), EQ, expandItem, many0(tuple((COMMA, expandItem))))))));
 //* expandItem        = STAR [ ref / OPEN levels CLOSE ]
 //*                   / "$value"
 //*                   / expandPath
@@ -781,7 +1035,7 @@ named!(expand<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$expand"), t
 //*                     / count [ OPEN expandCountOption *( SEMI expandCountOption ) CLOSE ]
 //*                     /         OPEN expandOption      *( SEMI expandOption      ) CLOSE
 //*                     ]
-named!(expandItem<&str, &str>, call!(recognize(alt((recognize(tuple((STAR, opt(alt((_ref, recognize(tuple((OPEN, levels, CLOSE)))))))))
+named!(expandItem<Input, Input>, call!(recognize(alt((recognize(tuple((STAR, opt(alt((_ref, recognize(tuple((OPEN, levels, CLOSE)))))))))
 					       , tag_no_case("$value")
 					       , recognize(tuple((expandPath,
 								   opt(alt((
@@ -796,7 +1050,7 @@ named!(expandItem<&str, &str>, call!(recognize(alt((recognize(tuple((STAR, opt(a
 //* expandPath        = [ ( qualifiedEntityTypeName / qualifiedComplexTypeName ) "/" ]
 //*                     *( ( complexProperty / complexColProperty ) "/" [ qualifiedComplexTypeName "/" ] )
 //*                     ( STAR / streamProperty / navigationProperty [ "/" qualifiedEntityTypeName ] )
-named!(expandPath<&str, &str>, call!(recognize(tuple((
+named!(expandPath<Input, Input>, call!(recognize(tuple((
 						opt(tuple((alt((qualifiedEntityTypeName, qualifiedComplexTypeName)), tag("/")))),
 						many0(tuple((alt((complexProperty, complexColProperty)), tag("/"), opt(tuple((qualifiedComplexTypeName, tag("/"))))))),
 						alt((STAR, streamProperty, recognize(tuple((navigationProperty, opt(tuple((tag("/"), qualifiedEntityTypeName))))))))
@@ -804,45 +1058,44 @@ named!(expandPath<&str, &str>, call!(recognize(tuple((
 
 //* expandCountOption = filter
 //*                   / search
-named!(expandCountOption<&str, &str>, call!(alt((filter, search))));
+named!(expandCountOption<Input, Input>, call!(alt((filter, search))));
 //* expandRefOption   = expandCountOption
 //*                   / orderby
 //*                   / skip
 //*                   / top
 //*                   / inlinecount
-named!(expandRefOption<&str, &str>, call!(alt((expandCountOption, orderby, skip, top, inlinecount))));
+named!(expandRefOption<Input, Input>, call!(alt((expandCountOption, orderby, skip, top, inlinecount))));
 //* expandOption      = expandRefOption
 //*                   / select
 //*                   / expand
 //*                   / compute
 //*                   / levels
 //*                   / aliasAndValue
-named!(expandOption<&str, &str>, call!(alt((expandRefOption, select, expand, compute, levels, aliasAndValue))));
+named!(expandOption<Input, Input>, call!(alt((expandRefOption, select, expand, compute, levels, aliasAndValue))));
 //*
 //* levels = ( "$levels" / "levels" ) EQ ( oneToNine *DIGIT / "max" )
-named!(levels<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$levels"), tag_no_case("levels"))), EQ, alt((recognize(tuple((oneToNine, many0(DIGIT)))), tag_no_case("max"))))))));
+named!(levels<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$levels"), tag_no_case("levels"))), EQ, alt((recognize(tuple((oneToNine, many0(DIGIT)))), tag_no_case("max"))))))));
 //*
 //* filter = ( "$filter" / "filter" ) EQ boolCommonExpr
-named!(filter<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$filter"), tag_no_case("filter"))), EQ, boolCommonExpr)))));
-fn filter_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::QueryOption<'a>> {
+named!(filter<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$filter"), tag_no_case("filter"))), EQ, boolCommonExpr)))));
+fn filter_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::QueryOption<'a>> {
 	let (input, _) = cut(tuple((opt(tag("$")), tag_no_case("filter"), EQ)))(input)?;
-	println!("parsing filter {}", input);
 
-	map(|i| commonExpr_wip(i, ctx, 0), ast::QueryOption::Filter)(input)
+	map(|i| commonExpr_wip(i, 0), ast::QueryOption::Filter)(input)
 }
 //*
 //* orderby     = ( "$orderby" / "orderby" ) EQ orderbyItem *( COMMA orderbyItem )
-named!(orderby<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$orderby"), tag_no_case("orderby"))), EQ, orderbyItem, many0(tuple((COMMA, orderbyItem))))))));
+named!(orderby<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$orderby"), tag_no_case("orderby"))), EQ, orderbyItem, many0(tuple((COMMA, orderbyItem))))))));
 //* orderbyItem = commonExpr [ RWS ( "asc" / "desc" ) ]
-named!(orderbyItem<&str, &str>, call!(recognize(tuple((commonExpr, opt(tuple((RWS, alt((tag_no_case("asc"), tag_no_case("desc")))))))))));
+named!(orderbyItem<Input, Input>, call!(recognize(tuple((commonExpr, opt(tuple((RWS, alt((tag_no_case("asc"), tag_no_case("desc")))))))))));
 //*
 //* skip = ( "$skip" / "skip" ) EQ 1*DIGIT
-named!(skip<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$skip"), tag_no_case("skip"))), EQ, many1(DIGIT))))));
+named!(skip<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$skip"), tag_no_case("skip"))), EQ, many1(DIGIT))))));
 //* top  = ( "$top"  / "top"  ) EQ 1*DIGIT
-named!(top<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$top"), tag_no_case("top"))), EQ, many1(DIGIT))))));
+named!(top<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$top"), tag_no_case("top"))), EQ, many1(DIGIT))))));
 //*
 //* index  = ( "$index" / "index" ) EQ 1*DIGIT
-named!(index<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$index"), tag_no_case("index"))), EQ, many1(DIGIT))))));
+named!(index<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$index"), tag_no_case("index"))), EQ, many1(DIGIT))))));
 //*
 //* format = ( "$format" / "format" ) EQ
 //*          ( "atom"
@@ -852,44 +1105,44 @@ named!(index<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$index"), tag
 //*          )                     ; format specific to the specific data service> or
 //*                                ; <An IANA-defined [IANA-MMT] content type>
 // errata: pchar includes special characters like & and =. It should probably be something like qchar_no_AMP_EQ
-named!(format_wip<&str, ast::QueryOption>, call!(preceded(
+named!(format_wip<Input, ast::QueryOption>, call!(preceded(
 					     tuple((opt(tag("$")), tag_no_case("format"), EQ)),
 					     map(
 						alt((
 							     nom::combinator::value(ast::FormatKind::Atom, tag_no_case("atom"))
 							   , nom::combinator::value(ast::FormatKind::JSON, tag_no_case("json"))
 							   , nom::combinator::value(ast::FormatKind::XML, tag_no_case("xml"))
-							   , map(recognize(tuple((many1(pchar), tag("/"), many1(pchar)))), ast::FormatKind::Custom)
+							   , map(recognize(tuple((many1(pchar), tag("/"), many1(pchar)))), |res| ast::FormatKind::Custom(res.data))
 						)),
 						ast::QueryOption::Format
 					     ))));
-named!(format<&str, &str>, call!(recognize(format_wip)));
+named!(format<Input, Input>, call!(recognize(format_wip)));
 
 //*
 //* inlinecount = ( "$count" / "count" ) EQ booleanValue
-named!(inlinecount<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$count"), tag_no_case("count"))), EQ, booleanValue)))));
+named!(inlinecount<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$count"), tag_no_case("count"))), EQ, booleanValue)))));
 //*
 //* schemaversion   = ( "$schemaversion" / "schemaversion" ) EQ ( STAR / 1*unreserved )
-named!(schemaversion<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$schemaversion"), tag_no_case("schemaversion"))), EQ, alt((STAR, recognize(many1(unreserved)))))))));
+named!(schemaversion<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$schemaversion"), tag_no_case("schemaversion"))), EQ, alt((STAR, recognize(many1(unreserved)))))))));
 //*
 //* search     = ( "$search" / "search" ) EQ BWS searchExpr
-named!(search<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$search"), tag_no_case("search"))), EQ, BWS, searchExpr)))));
+named!(search<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$search"), tag_no_case("search"))), EQ, BWS, searchExpr)))));
 //* searchExpr = ( OPEN BWS searchExpr BWS CLOSE
 //*              / searchTerm
 //*              ) [ searchOrExpr
 //*                / searchAndExpr
 //*                ]
-named!(searchExpr<&str, &str>, call!(recognize(tuple((alt((recognize(tuple((OPEN, BWS, searchExpr, BWS, CLOSE))), searchTerm)), opt(alt((searchOrExpr, searchAndExpr))))))));
+named!(searchExpr<Input, Input>, call!(recognize(tuple((alt((recognize(tuple((OPEN, BWS, searchExpr, BWS, CLOSE))), searchTerm)), opt(alt((searchOrExpr, searchAndExpr))))))));
 //*
 //* searchOrExpr  = RWS 'OR'  RWS searchExpr
-named!(searchOrExpr<&str, &str>, call!(recognize(tuple((RWS, tag("OR"), RWS, searchExpr)))));
+named!(searchOrExpr<Input, Input>, call!(recognize(tuple((RWS, tag("OR"), RWS, searchExpr)))));
 //* searchAndExpr = RWS [ 'AND' RWS ] searchExpr
-named!(searchAndExpr<&str, &str>, call!(recognize(tuple((RWS, opt(tuple((tag("AND"), RWS))), searchExpr)))));
+named!(searchAndExpr<Input, Input>, call!(recognize(tuple((RWS, opt(tuple((tag("AND"), RWS))), searchExpr)))));
 //*
 //* searchTerm   = [ 'NOT' RWS ] ( searchPhrase / searchWord )
-named!(searchTerm<&str, &str>, call!(recognize(tuple((opt(tuple((tag("NOT"), RWS))), alt((searchPhrase, searchWord)))))));
+named!(searchTerm<Input, Input>, call!(recognize(tuple((opt(tuple((tag("NOT"), RWS))), alt((searchPhrase, searchWord)))))));
 //* searchPhrase = quotation-mark 1*qchar-no-AMP-DQUOTE quotation-mark
-named!(searchPhrase<&str, &str>, call!(recognize(tuple((quotation_mark, many1(qchar_no_AMP_DQUOTE), quotation_mark)))));
+named!(searchPhrase<Input, Input>, call!(recognize(tuple((quotation_mark, many1(qchar_no_AMP_DQUOTE), quotation_mark)))));
 //*
 //* ; A searchWord is a sequence of one or more letters, digits, commas, or dots.
 //* ; This includes Unicode characters of categories L or N using UTF-8 and percent-encoding.
@@ -897,10 +1150,10 @@ named!(searchPhrase<&str, &str>, call!(recognize(tuple((quotation_mark, many1(qc
 //* ; Expressing this in ABNF is somewhat clumsy, so the following rule is overly generous.
 //TODO(validation)
 //* searchWord   = 1*( ALPHA / DIGIT / COMMA / "." / pct-encoded )
-named!(searchWord<&str, &str>, call!(recognize(many1(alt((ALPHA, DIGIT, COMMA, tag("."), pct_encoded))))));
+named!(searchWord<Input, Input>, call!(recognize(many1(alt((ALPHA, DIGIT, COMMA, tag("."), pct_encoded))))));
 //*
 //* select         = ( "$select" / "select" ) EQ selectItem *( COMMA selectItem )
-named!(select<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$select"), tag_no_case("select"))), EQ, selectItem, many0(tuple((COMMA, selectItem))))))));
+named!(select<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$select"), tag_no_case("select"))), EQ, selectItem, many0(tuple((COMMA, selectItem))))))));
 //* selectItem     = STAR
 //*                / allOperationsInSchema
 //*                / [ ( qualifiedEntityTypeName / qualifiedComplexTypeName ) "/" ]
@@ -908,7 +1161,7 @@ named!(select<&str, &str>, call!(recognize(tuple((alt((tag_no_case("$select"), t
 //*                  / qualifiedActionName
 //*                  / qualifiedFunctionName
 //*                  )
-named!(selectItem<&str, &str>, call!(alt((STAR
+named!(selectItem<Input, Input>, call!(alt((STAR
 				    , allOperationsInSchema
 				    , recognize(tuple((opt(tuple((alt((qualifiedEntityTypeName, qualifiedComplexTypeName)), tag("/")))),
 							alt((selectProperty, qualifiedActionName, qualifiedFunctionName))
@@ -921,7 +1174,7 @@ named!(selectItem<&str, &str>, call!(alt((STAR
 //*                             / "/" selectProperty
 //*                             ]
 // errata: missing brackets around the OPEN selectOption... and around "/" selectProperty
-named!(selectProperty<&str, &str>, call!(alt((primitiveProperty
+named!(selectProperty<Input, Input>, call!(alt((primitiveProperty
 					, recognize(tuple((primitiveColProperty, opt(tuple((OPEN, selectOptionPC, many0(tuple((SEMI, selectOptionPC))), CLOSE))))))
 					, navigationProperty
 					, recognize(tuple((selectPath, opt(alt((
@@ -930,50 +1183,50 @@ named!(selectProperty<&str, &str>, call!(alt((primitiveProperty
 										))))))
 					))));
 //* selectPath     = ( complexProperty / complexColProperty ) [ "/" qualifiedComplexTypeName ]
-named!(selectPath<&str, &str>, call!(recognize(tuple((alt((complexProperty, complexColProperty)), opt(tuple((tag("/"), qualifiedComplexTypeName))))))));
+named!(selectPath<Input, Input>, call!(recognize(tuple((alt((complexProperty, complexColProperty)), opt(tuple((tag("/"), qualifiedComplexTypeName))))))));
 //* selectOptionPC = filter / search / inlinecount / orderby / skip / top
-named!(selectOptionPC<&str, &str>, call!(alt((filter, search, inlinecount, orderby, skip, top))));
+named!(selectOptionPC<Input, Input>, call!(alt((filter, search, inlinecount, orderby, skip, top))));
 //* selectOption   = selectOptionPC
 //*                / compute / select / expand / aliasAndValue
-named!(selectOption<&str, &str>, call!(alt((selectOptionPC, compute, select, expand, aliasAndValue))));
+named!(selectOption<Input, Input>, call!(alt((selectOptionPC, compute, select, expand, aliasAndValue))));
 //*
 //* allOperationsInSchema = namespace "." STAR
-named!(allOperationsInSchema<&str, &str>, call!(recognize(tuple((namespace, tag("."), STAR)))));
+named!(allOperationsInSchema<Input, Input>, call!(recognize(tuple((namespace, tag("."), STAR)))));
 //*
 //* ; The parameterNames uniquely identify the bound function overload
 //* ; only if it has overloads.
 //* qualifiedActionName   = namespace "." action
-named!(qualifiedActionName<&str, &str>, call!(recognize(tuple((namespace, tag("."), action)))));
+named!(qualifiedActionName<Input, Input>, call!(recognize(tuple((namespace, tag("."), action)))));
 //* qualifiedFunctionName = namespace "." function [ OPEN parameterNames CLOSE ]
-named!(qualifiedFunctionName<&str, &str>, call!(recognize(tuple((namespace, tag("."), function, opt(tuple((OPEN, parameterNames, CLOSE))))))));
+named!(qualifiedFunctionName<Input, Input>, call!(recognize(tuple((namespace, tag("."), function, opt(tuple((OPEN, parameterNames, CLOSE))))))));
 //*
 //* ; The names of all non-binding parameters, separated by commas
 //* parameterNames = parameterName *( COMMA parameterName )
-named!(parameterNames<&str, &str>, call!(recognize(tuple((parameterName, many0(tuple((COMMA, parameterName))))))));
+named!(parameterNames<Input, Input>, call!(recognize(tuple((parameterName, many0(tuple((COMMA, parameterName))))))));
 //*
 //* deltatoken = "$deltatoken" EQ 1*( qchar-no-AMP )
-named!(deltatoken<&str, &str>, call!(recognize(tuple((tag_no_case("$deltatoken"), EQ, many1(qchar_no_AMP))))));
+named!(deltatoken<Input, Input>, call!(recognize(tuple((tag_no_case("$deltatoken"), EQ, many1(qchar_no_AMP))))));
 //*
 //* skiptoken = "$skiptoken" EQ 1*( qchar-no-AMP )
-named!(skiptoken<&str, &str>, call!(recognize(tuple((tag_no_case("$skiptoken"), EQ, many1(qchar_no_AMP))))));
+named!(skiptoken<Input, Input>, call!(recognize(tuple((tag_no_case("$skiptoken"), EQ, many1(qchar_no_AMP))))));
 //*
 //* aliasAndValue = parameterAlias EQ parameterValue
-named!(aliasAndValue<&str, &str>, call!(recognize(tuple((parameterAlias, EQ, parameterValue)))));
+named!(aliasAndValue<Input, Input>, call!(recognize(tuple((parameterAlias, EQ, parameterValue)))));
 //*
 //* nameAndValue = parameterName EQ parameterValue
-named!(nameAndValue<&str, &str>, call!(recognize(tuple((parameterName, EQ, parameterValue)))));
+named!(nameAndValue<Input, Input>, call!(recognize(tuple((parameterName, EQ, parameterValue)))));
 //*
 //* parameterValue = arrayOrObject
 //*                / commonExpr
-named!(parameterValue<&str, &str>, call!(alt((arrayOrObject, commonExpr))));
+named!(parameterValue<Input, Input>, call!(alt((arrayOrObject, commonExpr))));
 //*
 //* customQueryOption = customName [ EQ customValue ]
-named!(customQueryOption_wip<&str, ast::QueryOption>, do_parse!(foo: call!(recognize(tuple((customName, opt(tuple((EQ, customValue))))))) >> (ast::QueryOption::Custom(foo))));
-named!(customQueryOption<&str, &str>, call!(recognize(customQueryOption_wip)));
+named!(customQueryOption_wip<Input, ast::QueryOption>, do_parse!(foo: call!(recognize(tuple((customName, opt(tuple((EQ, customValue))))))) >> (ast::QueryOption::Custom(foo.data))));
+named!(customQueryOption<Input, Input>, call!(recognize(customQueryOption_wip)));
 //* customName        = qchar-no-AMP-EQ-AT-DOLLAR *( qchar-no-AMP-EQ )
-named!(customName<&str, &str>, call!(recognize(tuple((qchar_no_AMP_EQ_AT_DOLLAR, many0(qchar_no_AMP_EQ))))));
+named!(customName<Input, Input>, call!(recognize(tuple((qchar_no_AMP_EQ_AT_DOLLAR, many0(qchar_no_AMP_EQ))))));
 //* customValue       = *( qchar-no-AMP )
-named!(customValue<&str, &str>, call!(recognize(many0(qchar_no_AMP))));
+named!(customValue<Input, Input>, call!(recognize(many0(qchar_no_AMP))));
 //*
 //*
 //* ;------------------------------------------------------------------------------
@@ -981,7 +1234,7 @@ named!(customValue<&str, &str>, call!(recognize(many0(qchar_no_AMP))));
 //* ;------------------------------------------------------------------------------
 //*
 //* context         = "#" contextFragment
-named!(context<&str, &str>, call!(recognize(tuple((tag("#"), contextFragment)))));
+named!(context<Input, Input>, call!(recognize(tuple((tag("#"), contextFragment)))));
 //* contextFragment = 'Collection($ref)'
 //*                 / '$ref'
 //*                 / 'Collection(Edm.EntityType)'
@@ -991,7 +1244,7 @@ named!(context<&str, &str>, call!(recognize(tuple((tag("#"), contextFragment))))
 //*                 / entitySet ( '/$deletedEntity' / '/$link' / '/$deletedLink' )
 //*                 / entitySet keyPredicate "/" contextPropertyPath [ selectList ]
 //*                 / entitySet [ selectList ] [ '/$entity' / '/$delta' ]
-named!(contextFragment<&str, &str>, call!(alt((tag("Collection($ref)")
+named!(contextFragment<Input, Input>, call!(alt((tag("Collection($ref)")
 					 , tag("$ref")
 					 , tag("Collection(Edm.EntityType)")
 					 , tag("Collection(Edm.ComplexType)")
@@ -1009,15 +1262,15 @@ named!(contextFragment<&str, &str>, call!(alt((tag("Collection($ref)")
 				    ))));
 //*
 //* entitySet = entitySetName *( containmentNavigation ) [ "/" qualifiedEntityTypeName ]
-named!(entitySet<&str, &str>, call!(recognize(tuple((entitySetName, many0(containmentNavigation), opt(tuple((tag("/"), qualifiedEntityTypeName))))))));
+named!(entitySet<Input, Input>, call!(recognize(tuple((entitySetName, many0(containmentNavigation), opt(tuple((tag("/"), qualifiedEntityTypeName))))))));
 //*
 //* containmentNavigation = keyPredicate [ "/" qualifiedEntityTypeName ] navigation
-named!(containmentNavigation<&str, &str>, call!(recognize(tuple((keyPredicate, opt(tuple((tag("/"), qualifiedEntityTypeName))), navigation)))));
+named!(containmentNavigation<Input, Input>, call!(recognize(tuple((keyPredicate, opt(tuple((tag("/"), qualifiedEntityTypeName))), navigation)))));
 //* navigation            = *( "/" complexProperty [ "/" qualifiedComplexTypeName ] ) "/" navigationProperty
-named!(navigation<&str, &str>, call!(recognize(tuple((many0(tuple((tag("/"), complexProperty, opt(tuple((tag("/"), qualifiedComplexTypeName)))))), tag("/"), navigationProperty)))));
+named!(navigation<Input, Input>, call!(recognize(tuple((many0(tuple((tag("/"), complexProperty, opt(tuple((tag("/"), qualifiedComplexTypeName)))))), tag("/"), navigationProperty)))));
 //*
 //* selectList         = OPEN selectListItem *( COMMA selectListItem ) CLOSE
-named!(selectList<&str, &str>, call!(recognize(tuple((OPEN, selectListItem, many0(tuple((COMMA, selectListItem))), CLOSE)))));
+named!(selectList<Input, Input>, call!(recognize(tuple((OPEN, selectListItem, many0(tuple((COMMA, selectListItem))), CLOSE)))));
 //* selectListItem     = STAR ; all structural properties
 //*                    / allOperationsInSchema
 //*                    / [ qualifiedEntityTypeName "/" ]
@@ -1025,7 +1278,7 @@ named!(selectList<&str, &str>, call!(recognize(tuple((OPEN, selectListItem, many
 //*                      / qualifiedFunctionName
 //*                      / selectListProperty
 //*                      )
-named!(selectListItem<&str, &str>, call!(alt((STAR
+named!(selectListItem<Input, Input>, call!(alt((STAR
 					, allOperationsInSchema
 					, recognize(tuple((opt(tuple((qualifiedEntityTypeName, tag("/")))), alt((qualifiedActionName, qualifiedFunctionName, selectListProperty)))))
 				       ))));
@@ -1033,7 +1286,7 @@ named!(selectListItem<&str, &str>, call!(alt((STAR
 //*                    / primitiveColProperty
 //*                    / navigationProperty [ "+" ] [ selectList ]
 //*                    / selectPath [ "/" selectListProperty ]
-named!(selectListProperty<&str, &str>, call!(alt((primitiveProperty
+named!(selectListProperty<Input, Input>, call!(alt((primitiveProperty
 					    , primitiveColProperty
 					    , recognize(tuple((navigationProperty, opt(tag("+")), opt(selectList))))
 					    , recognize(tuple((selectPath, opt(tuple((tag("/"), selectListProperty))))))
@@ -1043,7 +1296,7 @@ named!(selectListProperty<&str, &str>, call!(alt((primitiveProperty
 //*                     / primitiveColProperty
 //*                     / complexColProperty
 //*                     / complexProperty [ [ "/" qualifiedComplexTypeName ] "/" contextPropertyPath ]
-named!(contextPropertyPath<&str, &str>, call!(alt((primitiveProperty
+named!(contextPropertyPath<Input, Input>, call!(alt((primitiveProperty
 					     , primitiveColProperty
 					     , complexColProperty
 					     , recognize(tuple((complexProperty, opt(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), tag("/"), contextPropertyPath))))))
@@ -1087,7 +1340,7 @@ named!(contextPropertyPath<&str, &str>, call!(alt((primitiveProperty
 //*              [ andExpr
 //*              / orExpr
 //*              ]
-named!(commonExpr<&str, &str>, call!(recognize(tuple((
+named!(commonExpr<Input, Input>, call!(recognize(tuple((
 						 alt((
 							 primitiveLiteral
 							 , arrayOrObject
@@ -1122,39 +1375,39 @@ named!(commonExpr<&str, &str>, call!(recognize(tuple((
 						 ))),
 						 opt(alt((andExpr, orExpr)))
 					)))));
-fn commonExpr_wip<'a>(input: &'a str, ctx: &Parser, prec: u8) -> IResult<&'a str, ast::Expr> {
+fn commonExpr_wip<'a>(input: Input<'a>, prec: u8) -> ExprOutput<'a> {
 	let (mut input, mut lhs) = alt((
-			 map(|i| primitiveLiteral_wip(i, ctx), ast::Expr::Lit),
+			 expr(map(|i| primitiveLiteral_wip(i), ast::ExprKind::Lit)),
 			 // arrayOrObject,
 			 // rootExpr,
-			 // |i| firstMemberExpr(i, ctx),
+			 expr(map(|i| firstMemberExpr_wip(i), ast::ExprKind::Member)),
 			 // functionExpr,
-			 |i| negateExpr_wip(i, ctx),
-			 |i| methodCallExpr_wip(i, ctx),
-			 |i| parenExpr_wip(i, ctx),
+			 |i| negateExpr_wip(i),
+			 |i| methodCallExpr_wip(i),
+			 |i| parenExpr_wip(i),
 			 // castExpr,
 			 // isofExpr,
-			 |i| notExpr_wip(i, ctx),
+			 |i| notExpr_wip(i),
 	))(input)?;
 
-	while let (i, Some(op)) = opt(verify(|i| binop_wip(i, ctx), |op| op.precedence() >= prec))(input)? {
+	while let (i, Some(op)) = opt(verify(|i| binop_wip(i), |op| op.precedence() >= prec))(input.clone())? {
 		let prec = op.precedence();
 
 		let (i, rhs) = match op {
 			// A list expression is only valid after the `in` operator but it's also ambiguous with the
 			// parenExpr if the list contains only one element. So we try it first
-			ast::BinOp::In => alt((|i| listExpr_wip(i, ctx), |i| commonExpr_wip(i, ctx, prec)))(i)?,
-			_ => commonExpr_wip(i, ctx, prec)?
+			ast::BinOp::In => alt((|i| listExpr_wip(i), |i| commonExpr_wip(i, prec)))(i)?,
+			_ => commonExpr_wip(i, prec)?
 		};
 
 		input = i;
-		lhs = ast::Expr::Binary(op, Box::new(lhs), Box::new(rhs));
+		lhs = Rc::new(input.parser.expr(ast::ExprKind::Binary(op, lhs, rhs)));
 	}
 
 	Ok((input, lhs))
 }
 
-fn binop_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::BinOp> {
+fn binop_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::BinOp> {
 		// TODO sort them by frequency for better performance
 		// FIXME use FromStr just like the method call
 		delimited(RWS, alt((
@@ -1179,21 +1432,46 @@ fn binop_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::BinOp> {
 //*
 //* boolCommonExpr = commonExpr ; resulting in a Boolean
 //TODO(validate)
-named!(boolCommonExpr<&str, &str>, call!(recognize(commonExpr)));
+named!(boolCommonExpr<Input, Input>, call!(recognize(commonExpr)));
 //*
 //* rootExpr = '$root/' ( entitySetName keyPredicate / singletonEntity ) [ singleNavigationExpr ]
-named!(rootExpr<&str, &str>, call!(recognize(tuple((tag("$root/"), alt((recognize(tuple((entitySetName, keyPredicate))), singletonEntity)), opt(singleNavigationExpr))))));
+named!(rootExpr<Input, Input>, call!(recognize(tuple((tag("$root/"), alt((recognize(tuple((entitySetName, keyPredicate))), singletonEntity)), opt(singleNavigationExpr))))));
 //*
 //* firstMemberExpr = memberExpr
 //*                 / inscopeVariableExpr [ "/" memberExpr ]
-named!(firstMemberExpr<&str, &str>, call!(alt((memberExpr, recognize(tuple((inscopeVariableExpr, opt(tuple((tag("/"), memberExpr))))))))));
+named!(firstMemberExpr<Input, Input>, call!(alt((memberExpr, recognize(tuple((inscopeVariableExpr, opt(tuple((tag("/"), memberExpr))))))))));
+fn firstMemberExpr_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
+	// let (input, node) = alt((
+	// 	|i| memberExpr_wip(i, &state),
+	// 	|i| memberExpr_wip(i, &state),
+	// ))(input)?;
+
+	unimplemented!();
+
+	// map(alt((
+	// 	|i| memberExpr_wip(i),
+	// 	|i| {
+	// 		let (i, var_expr) = inscopeVariableExpr_wip(i)?;
+	// 		let (i, member) = opt(preceded(tag("/"), |i| memberExpr_wip(i)))(i)?;
+
+	// 		let mut ret = vec![var_expr];
+	// 		if let Some(mut member) = member {
+	// 			ret.append(&mut member);
+	// 		}
+	// 		Ok((i, ret))
+	// 	},
+	// )), |mut v| { v.reverse(); v })(input)
+}
 //*
 //* memberExpr = [ qualifiedEntityTypeName "/" ]
 //*              ( propertyPathExpr
 //*              / boundFunctionExpr
 //*              / annotationExpr
 //*              )
-named!(memberExpr<&str, &str>, call!(recognize(tuple((opt(tuple((qualifiedEntityTypeName, tag("/")))), alt((propertyPathExpr, boundFunctionExpr, annotationExpr)))))));
+named!(memberExpr<Input, Input>, call!(recognize(tuple((opt(tuple((qualifiedEntityTypeName, tag("/")))), alt((propertyPathExpr, boundFunctionExpr, annotationExpr)))))));
+fn memberExpr_wip<'a, 'b>(input: Input<'a>) -> IResult<Input<'a>, ()> {
+	unimplemented!();
+}
 //*
 //* propertyPathExpr = ( entityColNavigationProperty [ collectionNavigationExpr ]
 //*                    / entityNavigationProperty    [ singleNavigationExpr ]
@@ -1203,7 +1481,7 @@ named!(memberExpr<&str, &str>, call!(recognize(tuple((opt(tuple((qualifiedEntity
 //*                    / primitiveProperty           [ primitivePathExpr ]
 //*                    / streamProperty              [ primitivePathExpr ]
 //*                    )
-named!(propertyPathExpr<&str, &str>, call!(recognize(alt((
+named!(propertyPathExpr<Input, Input>, call!(recognize(alt((
 						     tuple((entityColNavigationProperty, opt(collectionNavigationExpr)))
 						     , tuple((entityNavigationProperty, opt(singleNavigationExpr)))
 						     , tuple((complexColProperty, opt(complexColPathExpr)))
@@ -1219,46 +1497,49 @@ named!(propertyPathExpr<&str, &str>, call!(recognize(alt((
 //*                  / complexPathExpr
 //*                  / primitivePathExpr
 //*                  ]
-named!(annotationExpr<&str, &str>, call!(recognize(tuple((annotation, opt(alt((collectionPathExpr, singleNavigationExpr, complexPathExpr, primitivePathExpr))))))));
+named!(annotationExpr<Input, Input>, call!(recognize(tuple((annotation, opt(alt((collectionPathExpr, singleNavigationExpr, complexPathExpr, primitivePathExpr))))))));
 //*
 //* annotation          = AT [ namespace "." ] termName [ '#' annotationQualifier ]
-named!(annotation<&str, &str>, call!(recognize(tuple((AT, opt(tuple((namespace, tag(".")))), termName, opt(tuple((tag("#"), annotationQualifier))))))));
+named!(annotation<Input, Input>, call!(recognize(tuple((AT, opt(tuple((namespace, tag(".")))), termName, opt(tuple((tag("#"), annotationQualifier))))))));
 //* annotationQualifier = odataIdentifier
-named!(annotationQualifier<&str, &str>, call!(recognize(odataIdentifier)));
+named!(annotationQualifier<Input, Input>, call!(recognize(odataIdentifier)));
 //*
 //* inscopeVariableExpr  = implicitVariableExpr
 //*                      / parameterAlias
 //*                      / lambdaVariableExpr ; only allowed inside a lambdaPredicateExpr
 //TODO(validation)
-named!(inscopeVariableExpr<&str, &str>, call!(alt((implicitVariableExpr, parameterAlias, lambdaVariableExpr))));
+named!(inscopeVariableExpr<Input, Input>, call!(alt((implicitVariableExpr, parameterAlias, lambdaVariableExpr))));
+fn inscopeVariableExpr_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::PathSegment<'a>> {
+	unimplemented!();
+}
 //* implicitVariableExpr = '$it'              ; the current instance of the resource identified by the resource path
 //*                      / '$this'            ; the instance on which the query option is evaluated
-named!(implicitVariableExpr<&str, &str>, call!(alt((tag("$it"), tag("$this")))));
+named!(implicitVariableExpr<Input, Input>, call!(alt((tag("$it"), tag("$this")))));
 //* lambdaVariableExpr   = odataIdentifier
-named!(lambdaVariableExpr<&str, &str>, call!(recognize(odataIdentifier)));
+named!(lambdaVariableExpr<Input, Input>, call!(recognize(odataIdentifier)));
 //*
 //* collectionNavigationExpr = [ "/" qualifiedEntityTypeName ]
 //*                            [ keyPredicate [ singleNavigationExpr ]
 //*                            / collectionPathExpr
 //*                            ]
-named!(collectionNavigationExpr<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedEntityTypeName))), opt(alt((
+named!(collectionNavigationExpr<Input, Input>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedEntityTypeName))), opt(alt((
 															   recognize(tuple((keyPredicate, opt(singleNavigationExpr))))
 															   , collectionPathExpr
 															))))))));
 //*
 //* singleNavigationExpr = "/" memberExpr
-named!(singleNavigationExpr<&str, &str>, call!(recognize(tuple((tag("/"), memberExpr)))));
+named!(singleNavigationExpr<Input, Input>, call!(recognize(tuple((tag("/"), memberExpr)))));
 //*
 //* complexColPathExpr = [ "/" qualifiedComplexTypeName ]
 //*                      [ collectionPathExpr ]
-named!(complexColPathExpr<&str, &str>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(collectionPathExpr))))));
+named!(complexColPathExpr<Input, Input>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(collectionPathExpr))))));
 //*
 //* collectionPathExpr = count [ OPEN expandCountOption *( SEMI expandCountOption ) CLOSE ]
 //*                    / "/" boundFunctionExpr
 //*                    / "/" annotationExpr
 //*                    / "/" anyExpr
 //*                    / "/" allExpr
-named!(collectionPathExpr<&str, &str>, call!(alt((
+named!(collectionPathExpr<Input, Input>, call!(alt((
 					    recognize(tuple((count, opt(tuple((OPEN, expandCountOption, many0(tuple((SEMI, expandCountOption))), CLOSE))))))
 					    , recognize(tuple((tag("/"), boundFunctionExpr)))
 					    , recognize(tuple((tag("/"), annotationExpr)))
@@ -1271,7 +1552,7 @@ named!(collectionPathExpr<&str, &str>, call!(alt((
 //*                   / "/" boundFunctionExpr
 //*                   / "/" annotationExpr
 //*                   ]
-named!(complexPathExpr<&str, &str>, call!(recognize(tuple((
+named!(complexPathExpr<Input, Input>, call!(recognize(tuple((
 						      opt(tuple((tag("/"), qualifiedComplexTypeName))),
 						      opt(alt((
 								tuple((tag("/"), propertyPathExpr))
@@ -1281,12 +1562,12 @@ named!(complexPathExpr<&str, &str>, call!(recognize(tuple((
 						)))));
 //*
 //* primitivePathExpr = "/" [ annotationExpr / boundFunctionExpr ]
-named!(primitivePathExpr<&str, &str>, call!(recognize(tuple((tag("/"), opt(alt((annotationExpr, boundFunctionExpr))))))));
+named!(primitivePathExpr<Input, Input>, call!(recognize(tuple((tag("/"), opt(alt((annotationExpr, boundFunctionExpr))))))));
 //*
 //* boundFunctionExpr = functionExpr ; boundFunction segments can only be composed if the type of the
 //*                                  ; previous segment matches the type of the first function parameter
 //TODO(validation)
-named!(boundFunctionExpr<&str, &str>, call!(recognize(functionExpr)));
+named!(boundFunctionExpr<Input, Input>, call!(recognize(functionExpr)));
 //*
 //* functionExpr = namespace "."
 //*                ( entityColFunction    functionExprParameters [ collectionNavigationExpr ]
@@ -1296,7 +1577,7 @@ named!(boundFunctionExpr<&str, &str>, call!(recognize(functionExpr)));
 //*                / primitiveColFunction functionExprParameters [ collectionPathExpr ]
 //*                / primitiveFunction    functionExprParameters [ primitivePathExpr ]
 //*                )
-named!(functionExpr<&str, &str>, call!(recognize(tuple((namespace,
+named!(functionExpr<Input, Input>, call!(recognize(tuple((namespace,
 						   tag("."),
 						   alt((
 							recognize(tuple((entityColFunction, functionExprParameters, opt(collectionNavigationExpr))))
@@ -1308,17 +1589,17 @@ named!(functionExpr<&str, &str>, call!(recognize(tuple((namespace,
 						   )))))));
 //*
 //* functionExprParameters = OPEN [ functionExprParameter *( COMMA functionExprParameter ) ] CLOSE
-named!(functionExprParameters<&str, &str>, call!(recognize(tuple((OPEN, opt(tuple((functionExprParameter, many0(tuple((COMMA, functionExprParameter)))))), CLOSE)))));
+named!(functionExprParameters<Input, Input>, call!(recognize(tuple((OPEN, opt(tuple((functionExprParameter, many0(tuple((COMMA, functionExprParameter)))))), CLOSE)))));
 //* functionExprParameter  = parameterName EQ ( parameterAlias / parameterValue )
-named!(functionExprParameter<&str, &str>, call!(recognize(tuple((parameterName, EQ, alt((parameterAlias, parameterValue)))))));
+named!(functionExprParameter<Input, Input>, call!(recognize(tuple((parameterName, EQ, alt((parameterAlias, parameterValue)))))));
 //*
 //* anyExpr = "any" OPEN BWS [ lambdaVariableExpr BWS COLON BWS lambdaPredicateExpr ] BWS CLOSE
-named!(anyExpr<&str, &str>, call!(recognize(tuple((tag_no_case("any"), OPEN, BWS, opt(tuple((lambdaVariableExpr, BWS, COLON, BWS, lambdaPredicateExpr))), BWS, CLOSE)))));
+named!(anyExpr<Input, Input>, call!(recognize(tuple((tag_no_case("any"), OPEN, BWS, opt(tuple((lambdaVariableExpr, BWS, COLON, BWS, lambdaPredicateExpr))), BWS, CLOSE)))));
 //* allExpr = "all" OPEN BWS   lambdaVariableExpr BWS COLON BWS lambdaPredicateExpr   BWS CLOSE
-named!(allExpr<&str, &str>, call!(recognize(tuple((tag_no_case("all"), OPEN, BWS, lambdaVariableExpr, BWS, COLON, BWS, lambdaPredicateExpr, BWS, CLOSE)))));
+named!(allExpr<Input, Input>, call!(recognize(tuple((tag_no_case("all"), OPEN, BWS, lambdaVariableExpr, BWS, COLON, BWS, lambdaPredicateExpr, BWS, CLOSE)))));
 //* lambdaPredicateExpr = boolCommonExpr ; containing at least one lambdaVariableExpr
 //TODO(use verify() to verify that it contains at least one lambdaVariableExpr)
-named!(lambdaPredicateExpr<&str, &str>, call!(recognize(boolCommonExpr)));
+named!(lambdaPredicateExpr<Input, Input>, call!(recognize(boolCommonExpr)));
 //*
 //* methodCallExpr = indexOfMethodCallExpr
 //*                / toLowerMethodCallExpr
@@ -1347,7 +1628,7 @@ named!(lambdaPredicateExpr<&str, &str>, call!(recognize(boolCommonExpr)));
 //*                / maxDateTimeMethodCallExpr
 //*                / nowMethodCallExpr
 //*                / boolMethodCallExpr
-named!(methodCallExpr<&str, &str>, call!(alt((
+named!(methodCallExpr<Input, Input>, call!(alt((
 						alt((indexOfMethodCallExpr
 							, toLowerMethodCallExpr
 							, toUpperMethodCallExpr
@@ -1379,15 +1660,14 @@ named!(methodCallExpr<&str, &str>, call!(alt((
 							, boolMethodCallExpr
 						))
 					))));
-fn methodCallExpr_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Expr> {
-	let (input, method) = map_res(take_while1(|c: char| c.is_alphabetic()), ast::Method::from_str)(input)?;
+fn methodCallExpr_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
+	let (input, method) = map_res(take_while1(|c: char| c.is_alphabetic()), |res: Input| ast::Method::from_str(res.data))(input)?;
 
 	let (m, n) = method.arity();
 
-	let arg_parser = verify(separated_list(tuple((BWS, COMMA, BWS)), |i| commonExpr_wip(i, ctx, 0)), |v: &Vec<ast::Expr>| m <= v.len() && v.len() <= n);
-	let (input, args) = delimited(tuple((OPEN, BWS)), arg_parser, tuple((BWS, CLOSE)))(input)?;
+	let arg_parser = verify(separated_list(tuple((BWS, COMMA, BWS)), |i| commonExpr_wip(i, 0)), move |v: &Vec<Rc<ast::Expr<'a>>>| m <= v.len() && v.len() <= n);
 
-	Ok((input, ast::Expr::MethodCall(method, args)))
+	expr(map(delimited(tuple((OPEN, BWS)), arg_parser, tuple((BWS, CLOSE))), move |args| ast::ExprKind::MethodCall(method, args)))(input)
 }
 //*
 //* boolMethodCallExpr = endsWithMethodCallExpr
@@ -1396,7 +1676,7 @@ fn methodCallExpr_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast:
 //*                    / intersectsMethodCallExpr
 //*                    / hasSubsetMethodCallExpr
 //*                    / hasSubsequenceMethodCallExpr
-named!(boolMethodCallExpr<&str, &str>, call!(alt((endsWithMethodCallExpr
+named!(boolMethodCallExpr<Input, Input>, call!(alt((endsWithMethodCallExpr
 					    , startsWithMethodCallExpr
 					    , containsMethodCallExpr
 					    , intersectsMethodCallExpr
@@ -1404,145 +1684,141 @@ named!(boolMethodCallExpr<&str, &str>, call!(alt((endsWithMethodCallExpr
 					    , hasSubsequenceMethodCallExpr))));
 //*
 //* concatMethodCallExpr     = "concat"     OPEN BWS commonExpr BWS COMMA BWS commonExpr BWS CLOSE
-named!(concatMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("concat"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
+named!(concatMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("concat"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
 //* containsMethodCallExpr   = "contains"   OPEN BWS commonExpr BWS COMMA BWS commonExpr BWS CLOSE
-named!(containsMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("contains"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
+named!(containsMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("contains"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
 //* endsWithMethodCallExpr   = "endswith"   OPEN BWS commonExpr BWS COMMA BWS commonExpr BWS CLOSE
-named!(endsWithMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("endswith"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
+named!(endsWithMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("endswith"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
 //* indexOfMethodCallExpr    = "indexof"    OPEN BWS commonExpr BWS COMMA BWS commonExpr BWS CLOSE
-named!(indexOfMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("indexof"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
+named!(indexOfMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("indexof"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
 //* lengthMethodCallExpr     = "length"     OPEN BWS commonExpr BWS CLOSE
-named!(lengthMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("length"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(lengthMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("length"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* startsWithMethodCallExpr = "startswith" OPEN BWS commonExpr BWS COMMA BWS commonExpr BWS CLOSE
-named!(startsWithMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("startswith"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
+named!(startsWithMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("startswith"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
 //* substringMethodCallExpr  = "substring"  OPEN BWS commonExpr BWS COMMA BWS commonExpr BWS [ COMMA BWS commonExpr BWS ] CLOSE
-named!(substringMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("substring"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, opt(tuple((COMMA, BWS, commonExpr, BWS))), CLOSE)))));
+named!(substringMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("substring"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, opt(tuple((COMMA, BWS, commonExpr, BWS))), CLOSE)))));
 //* toLowerMethodCallExpr    = "tolower"    OPEN BWS commonExpr BWS CLOSE
-named!(toLowerMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("tolower"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(toLowerMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("tolower"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* toUpperMethodCallExpr    = "toupper"    OPEN BWS commonExpr BWS CLOSE
-named!(toUpperMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("toupper"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(toUpperMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("toupper"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* trimMethodCallExpr       = "trim"       OPEN BWS commonExpr BWS CLOSE
-named!(trimMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("trim"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(trimMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("trim"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //*
 //* yearMethodCallExpr               = "year"               OPEN BWS commonExpr BWS CLOSE
-named!(yearMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("year"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(yearMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("year"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* monthMethodCallExpr              = "month"              OPEN BWS commonExpr BWS CLOSE
-named!(monthMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("month"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(monthMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("month"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* dayMethodCallExpr                = "day"                OPEN BWS commonExpr BWS CLOSE
-named!(dayMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("day"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(dayMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("day"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* hourMethodCallExpr               = "hour"               OPEN BWS commonExpr BWS CLOSE
-named!(hourMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("hour"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(hourMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("hour"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* minuteMethodCallExpr             = "minute"             OPEN BWS commonExpr BWS CLOSE
-named!(minuteMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("minute"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(minuteMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("minute"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* secondMethodCallExpr             = "second"             OPEN BWS commonExpr BWS CLOSE
-named!(secondMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("second"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(secondMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("second"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* fractionalsecondsMethodCallExpr  = "fractionalseconds"  OPEN BWS commonExpr BWS CLOSE
-named!(fractionalsecondsMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("fractionalseconds"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(fractionalsecondsMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("fractionalseconds"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* totalsecondsMethodCallExpr       = "totalseconds"       OPEN BWS commonExpr BWS CLOSE
-named!(totalsecondsMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("totalseconds"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(totalsecondsMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("totalseconds"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* dateMethodCallExpr               = "date"               OPEN BWS commonExpr BWS CLOSE
-named!(dateMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("date"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(dateMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("date"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* timeMethodCallExpr               = "time"               OPEN BWS commonExpr BWS CLOSE
-named!(timeMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("time"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(timeMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("time"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* totalOffsetMinutesMethodCallExpr = "totaloffsetminutes" OPEN BWS commonExpr BWS CLOSE
-named!(totalOffsetMinutesMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("totaloffsetminutes"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(totalOffsetMinutesMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("totaloffsetminutes"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //*
 //* minDateTimeMethodCallExpr = "mindatetime" OPEN BWS CLOSE
-named!(minDateTimeMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("mindatetime"), OPEN, BWS, CLOSE)))));
+named!(minDateTimeMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("mindatetime"), OPEN, BWS, CLOSE)))));
 //* maxDateTimeMethodCallExpr = "maxdatetime" OPEN BWS CLOSE
-named!(maxDateTimeMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("maxdatetime"), OPEN, BWS, CLOSE)))));
+named!(maxDateTimeMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("maxdatetime"), OPEN, BWS, CLOSE)))));
 //* nowMethodCallExpr         = "now"         OPEN BWS CLOSE
-named!(nowMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("now"), OPEN, BWS, CLOSE)))));
+named!(nowMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("now"), OPEN, BWS, CLOSE)))));
 //*
 //* roundMethodCallExpr   = "round"   OPEN BWS commonExpr BWS CLOSE
-named!(roundMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("round"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(roundMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("round"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* floorMethodCallExpr   = "floor"   OPEN BWS commonExpr BWS CLOSE
-named!(floorMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("floor"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(floorMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("floor"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* ceilingMethodCallExpr = "ceiling" OPEN BWS commonExpr BWS CLOSE
-named!(ceilingMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("ceiling"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(ceilingMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("ceiling"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //*
 //* distanceMethodCallExpr   = "geo.distance"   OPEN BWS commonExpr BWS COMMA BWS commonExpr BWS CLOSE
-named!(distanceMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("geo.distance"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
+named!(distanceMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("geo.distance"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
 //* geoLengthMethodCallExpr  = "geo.length"     OPEN BWS commonExpr BWS CLOSE
-named!(geoLengthMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("geo.length"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
+named!(geoLengthMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("geo.length"), OPEN, BWS, commonExpr, BWS, CLOSE)))));
 //* intersectsMethodCallExpr = "geo.intersects" OPEN BWS commonExpr BWS COMMA BWS commonExpr BWS CLOSE
-named!(intersectsMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("geo.intersects"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
+named!(intersectsMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("geo.intersects"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
 //*
 //* hasSubsetMethodCallExpr      = "hassubset"      OPEN BWS commonExpr BWS COMMA BWS commonExpr BWS CLOSE
-named!(hasSubsetMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("hassubset"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
+named!(hasSubsetMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("hassubset"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
 //* hasSubsequenceMethodCallExpr = "hassubsequence" OPEN BWS commonExpr BWS COMMA BWS commonExpr BWS CLOSE
-named!(hasSubsequenceMethodCallExpr<&str, &str>, call!(recognize(tuple((tag_no_case("hassubsequence"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
+named!(hasSubsequenceMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no_case("hassubsequence"), OPEN, BWS, commonExpr, BWS, COMMA, BWS, commonExpr, BWS, CLOSE)))));
 //*
 //* parenExpr = OPEN BWS commonExpr BWS CLOSE
-named!(parenExpr<&str, &str>, call!(recognize(tuple((OPEN, BWS, commonExpr, BWS, CLOSE)))));
-fn parenExpr_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Expr> {
-	delimited(tuple((OPEN, BWS)), |i| commonExpr_wip(i, ctx, 0), tuple((BWS, CLOSE)))(input)
+named!(parenExpr<Input, Input>, call!(recognize(tuple((OPEN, BWS, commonExpr, BWS, CLOSE)))));
+fn parenExpr_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
+	delimited(tuple((OPEN, BWS)), |i| commonExpr_wip(i, 0), tuple((BWS, CLOSE)))(input)
 }
 //* listExpr  = OPEN BWS commonExpr BWS *( COMMA BWS commonExpr BWS ) CLOSE
-named!(listExpr<&str, &str>, call!(recognize(tuple((OPEN, BWS, commonExpr, many0(tuple((COMMA, BWS, commonExpr, BWS))), CLOSE)))));
-fn listExpr_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Expr> {
-	let element_parser = map(separated_nonempty_list(tuple((BWS, COMMA, BWS)), |i| commonExpr_wip(i, ctx, 0)), ast::Expr::List);
+named!(listExpr<Input, Input>, call!(recognize(tuple((OPEN, BWS, commonExpr, many0(tuple((COMMA, BWS, commonExpr, BWS))), CLOSE)))));
+fn listExpr_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
+	let element_parser = expr(map(separated_nonempty_list(tuple((BWS, COMMA, BWS)), |i| commonExpr_wip(i, 0)), ast::ExprKind::List));
 	delimited(tuple((OPEN, BWS)), element_parser, tuple((BWS, CLOSE)))(input)
 }
 //*
 //* andExpr = RWS "and" RWS boolCommonExpr
-named!(andExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("and"), RWS, boolCommonExpr)))));
+named!(andExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("and"), RWS, boolCommonExpr)))));
 //* orExpr  = RWS "or"  RWS boolCommonExpr
-named!(orExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("or"), RWS, boolCommonExpr)))));
+named!(orExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("or"), RWS, boolCommonExpr)))));
 //*
 //* eqExpr = RWS "eq" RWS commonExpr
-named!(eqExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("eq"), RWS, commonExpr)))));
+named!(eqExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("eq"), RWS, commonExpr)))));
 //* neExpr = RWS "ne" RWS commonExpr
-named!(neExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("ne"), RWS, commonExpr)))));
+named!(neExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("ne"), RWS, commonExpr)))));
 //* ltExpr = RWS "lt" RWS commonExpr
-named!(ltExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("lt"), RWS, commonExpr)))));
+named!(ltExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("lt"), RWS, commonExpr)))));
 //* leExpr = RWS "le" RWS commonExpr
-named!(leExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("le"), RWS, commonExpr)))));
+named!(leExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("le"), RWS, commonExpr)))));
 //* gtExpr = RWS "gt" RWS commonExpr
-named!(gtExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("gt"), RWS, commonExpr)))));
+named!(gtExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("gt"), RWS, commonExpr)))));
 //* geExpr = RWS "ge" RWS commonExpr
-named!(geExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("ge"), RWS, commonExpr)))));
+named!(geExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("ge"), RWS, commonExpr)))));
 //* inExpr = RWS "in" RWS commonExpr
-named!(inExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("in"), RWS, commonExpr)))));
+named!(inExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("in"), RWS, commonExpr)))));
 //*
 //* hasExpr = RWS "has" RWS enum
-named!(hasExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("has"), RWS, commonExpr)))));
+named!(hasExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("has"), RWS, commonExpr)))));
 //*
 //* addExpr   = RWS "add"   RWS commonExpr
-named!(addExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("add"), RWS, commonExpr)))));
+named!(addExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("add"), RWS, commonExpr)))));
 //* subExpr   = RWS "sub"   RWS commonExpr
-named!(subExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("sub"), RWS, commonExpr)))));
+named!(subExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("sub"), RWS, commonExpr)))));
 //* mulExpr   = RWS "mul"   RWS commonExpr
-named!(mulExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("mul"), RWS, commonExpr)))));
+named!(mulExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("mul"), RWS, commonExpr)))));
 //* divExpr   = RWS "div"   RWS commonExpr
-named!(divExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("div"), RWS, commonExpr)))));
+named!(divExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("div"), RWS, commonExpr)))));
 //* divbyExpr = RWS "divby" RWS commonExpr
-named!(divbyExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("divby"), RWS, commonExpr)))));
+named!(divbyExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("divby"), RWS, commonExpr)))));
 //* modExpr   = RWS "mod"   RWS commonExpr
-named!(modExpr<&str, &str>, call!(recognize(tuple((RWS, tag_no_case("mod"), RWS, commonExpr)))));
+named!(modExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("mod"), RWS, commonExpr)))));
 //*
 //* negateExpr = "-" BWS commonExpr
-named!(negateExpr<&str, &str>, call!(recognize(tuple((tag("-"), BWS, commonExpr)))));
-fn negateExpr_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Expr> {
+named!(negateExpr<Input, Input>, call!(recognize(tuple((tag("-"), BWS, commonExpr)))));
+fn negateExpr_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
 	let op = ast::UnOp::Neg;
-	let (input, expr) = preceded(tag("-"), |i| commonExpr_wip(i, ctx, op.precedence()))(input)?;
-
-	Ok((input, ast::Expr::Unary(op, Box::new(expr))))
+	expr(map(preceded(tag("-"), move |i| commonExpr_wip(i, op.precedence())), move |expr| ast::ExprKind::Unary(op, expr)))(input)
 }
 //*
 //* notExpr = "not" RWS boolCommonExpr
-named!(notExpr<&str, &str>, call!(recognize(tuple((tag_no_case("not"), RWS, boolCommonExpr)))));
-fn notExpr_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Expr> {
+named!(notExpr<Input, Input>, call!(recognize(tuple((tag_no_case("not"), RWS, boolCommonExpr)))));
+fn notExpr_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
 	let op = ast::UnOp::Not;
-	let (input, expr) = preceded(tuple((tag_no_case("not"), RWS)), |i| commonExpr_wip(i, ctx, op.precedence()))(input)?;
-
-	Ok((input, ast::Expr::Unary(op, Box::new(expr))))
+	expr(map(preceded(tag("not"), move |i| commonExpr_wip(i, op.precedence())), move |expr| ast::ExprKind::Unary(op, expr)))(input)
 }
 //*
 //* isofExpr = "isof" OPEN BWS [ commonExpr BWS COMMA BWS ] qualifiedTypeName BWS CLOSE
-named!(isofExpr<&str, &str>, call!(recognize(tuple((tag_no_case("isof"), OPEN, BWS, opt(tuple((commonExpr, BWS, COMMA, BWS))), qualifiedTypeName, BWS, CLOSE)))));
+named!(isofExpr<Input, Input>, call!(recognize(tuple((tag_no_case("isof"), OPEN, BWS, opt(tuple((commonExpr, BWS, COMMA, BWS))), qualifiedTypeName, BWS, CLOSE)))));
 //* castExpr = "cast" OPEN BWS [ commonExpr BWS COMMA BWS ] qualifiedTypeName BWS CLOSE
-named!(castExpr<&str, &str>, call!(recognize(tuple((tag_no_case("cast"), OPEN, BWS, opt(tuple((commonExpr, BWS, COMMA, BWS))), qualifiedTypeName, BWS, CLOSE)))));
+named!(castExpr<Input, Input>, call!(recognize(tuple((tag_no_case("cast"), OPEN, BWS, opt(tuple((commonExpr, BWS, COMMA, BWS))), qualifiedTypeName, BWS, CLOSE)))));
 //*
 //*
 //* ;------------------------------------------------------------------------------
@@ -1556,12 +1832,12 @@ named!(castExpr<&str, &str>, call!(recognize(tuple((tag_no_case("cast"), OPEN, B
 //*               / complexInUri
 //*               / rootExprCol
 //*               / primitiveColInUri
-named!(arrayOrObject<&str, &str>, call!(alt((complexColInUri, complexInUri, rootExprCol, primitiveColInUri))));
+named!(arrayOrObject<Input, Input>, call!(alt((complexColInUri, complexInUri, rootExprCol, primitiveColInUri))));
 //*
 //* complexColInUri = begin-array
 //*                   [ complexInUri *( value-separator complexInUri ) ]
 //*                   end-array
-named!(complexColInUri<&str, &str>, call!(recognize(tuple((begin_array, opt(tuple((complexInUri, many0(tuple((value_separator, complexInUri)))))), end_array)))));
+named!(complexColInUri<Input, Input>, call!(recognize(tuple((begin_array, opt(tuple((complexInUri, many0(tuple((value_separator, complexInUri)))))), end_array)))));
 //*
 //* complexInUri = begin-object
 //*                [ ( annotationInUri
@@ -1580,7 +1856,7 @@ named!(complexColInUri<&str, &str>, call!(recognize(tuple((begin_array, opt(tupl
 //*                   )
 //*                ]
 //*                end-object
-named!(complexInUri<&str, &str>, call!(recognize(tuple((begin_object,
+named!(complexInUri<Input, Input>, call!(recognize(tuple((begin_object,
 						   opt(tuple((
 							       alt((  annotationInUri
 								    , primitivePropertyInUri
@@ -1608,76 +1884,76 @@ named!(complexInUri<&str, &str>, call!(recognize(tuple((begin_object,
 //*                             name-separator
 //*                             complexColInUri
 //*                           )
-named!(collectionPropertyInUri<&str, &str>, call!(alt((recognize(tuple((quotation_mark, primitiveColProperty, quotation_mark, name_separator, primitiveColInUri)))
+named!(collectionPropertyInUri<Input, Input>, call!(alt((recognize(tuple((quotation_mark, primitiveColProperty, quotation_mark, name_separator, primitiveColInUri)))
 						 , recognize(tuple((quotation_mark, complexColProperty, quotation_mark, name_separator, complexColInUri)))))));
 
 //*
 //* primitiveColInUri = begin-array
 //*                     [ primitiveLiteralInJSON *( value-separator primitiveLiteralInJSON ) ]
 //*                     end-array
-named!(primitiveColInUri<&str, &str>, call!(recognize(tuple((begin_array, opt(tuple((primitiveLiteralInJSON, many0(tuple((value_separator, primitiveLiteralInJSON)))))), end_array)))));
+named!(primitiveColInUri<Input, Input>, call!(recognize(tuple((begin_array, opt(tuple((primitiveLiteralInJSON, many0(tuple((value_separator, primitiveLiteralInJSON)))))), end_array)))));
 //*
 //* complexPropertyInUri = quotation-mark complexProperty quotation-mark
 //*                        name-separator
 //*                        complexInUri
-named!(complexPropertyInUri<&str, &str>, call!(recognize(tuple((quotation_mark, complexProperty, quotation_mark, name_separator, complexInUri)))));
+named!(complexPropertyInUri<Input, Input>, call!(recognize(tuple((quotation_mark, complexProperty, quotation_mark, name_separator, complexInUri)))));
 //*
 //* annotationInUri = quotation-mark AT namespace "." termName quotation-mark
 //*                   name-separator
 //*                   ( complexInUri / complexColInUri / primitiveLiteralInJSON / primitiveColInUri )
-named!(annotationInUri<&str, &str>, call!(recognize(tuple((quotation_mark, AT, namespace, tag("."), termName, quotation_mark,
+named!(annotationInUri<Input, Input>, call!(recognize(tuple((quotation_mark, AT, namespace, tag("."), termName, quotation_mark,
 						      name_separator,
 						      alt((complexInUri, complexColInUri, primitiveLiteralInJSON, primitiveColInUri)))))));
 //*
 //* primitivePropertyInUri = quotation-mark primitiveProperty quotation-mark
 //*                          name-separator
 //*                          primitiveLiteralInJSON
-named!(primitivePropertyInUri<&str, &str>, call!(recognize(tuple((quotation_mark, primitiveProperty, quotation_mark, name_separator, primitiveLiteralInJSON)))));
+named!(primitivePropertyInUri<Input, Input>, call!(recognize(tuple((quotation_mark, primitiveProperty, quotation_mark, name_separator, primitiveLiteralInJSON)))));
 //*
 //* navigationPropertyInUri = singleNavPropInJSON
 //*                         / collectionNavPropInJSON
-named!(navigationPropertyInUri<&str, &str>, call!(alt((singleNavPropInJSON, collectionNavPropInJSON))));
+named!(navigationPropertyInUri<Input, Input>, call!(alt((singleNavPropInJSON, collectionNavPropInJSON))));
 //* singleNavPropInJSON     = quotation-mark entityNavigationProperty quotation-mark
 //* 													name-separator
 //* 													rootExpr
-named!(singleNavPropInJSON<&str, &str>, call!(recognize(tuple((quotation_mark, entityNavigationProperty, quotation_mark, name_separator, rootExpr)))));
+named!(singleNavPropInJSON<Input, Input>, call!(recognize(tuple((quotation_mark, entityNavigationProperty, quotation_mark, name_separator, rootExpr)))));
 //* collectionNavPropInJSON = quotation-mark entityColNavigationProperty quotation-mark
 //* 													name-separator
 //* 													rootExprCol
-named!(collectionNavPropInJSON<&str, &str>, call!(recognize(tuple((quotation_mark, entityColNavigationProperty, quotation_mark, name_separator, rootExprCol)))));
+named!(collectionNavPropInJSON<Input, Input>, call!(recognize(tuple((quotation_mark, entityColNavigationProperty, quotation_mark, name_separator, rootExprCol)))));
 //*
 //* rootExprCol = begin-array
 //*               [ rootExpr *( value-separator rootExpr ) ]
 //*               end-array
-named!(rootExprCol<&str, &str>, call!(recognize(tuple((begin_array, opt(tuple((rootExpr, many0(tuple((value_separator, rootExpr)))))), end_array)))));
+named!(rootExprCol<Input, Input>, call!(recognize(tuple((begin_array, opt(tuple((rootExpr, many0(tuple((value_separator, rootExpr)))))), end_array)))));
 //*
 //* ; JSON syntax: adapted to URI restrictions from [RFC4627]
 //* begin-object = BWS ( "{" / "%7B" ) BWS
-named!(begin_object<&str, &str>, call!(recognize(tuple((BWS, alt((tag("{"), tag("%7B"))))))));
+named!(begin_object<Input, Input>, call!(recognize(tuple((BWS, alt((tag("{"), tag("%7B"))))))));
 //* end-object   = BWS ( "}" / "%7D" )
-named!(end_object<&str, &str>, call!(recognize(tuple((BWS, alt((tag("}"), tag("%7D"))))))));
+named!(end_object<Input, Input>, call!(recognize(tuple((BWS, alt((tag("}"), tag("%7D"))))))));
 //*
 //* begin-array = BWS ( "[" / "%5B" ) BWS
-named!(begin_array<&str, &str>, call!(recognize(tuple((BWS, alt((tag("["), tag("%5B"))))))));
+named!(begin_array<Input, Input>, call!(recognize(tuple((BWS, alt((tag("["), tag("%5B"))))))));
 //* end-array   = BWS ( "]" / "%5D" )
-named!(end_array<&str, &str>, call!(recognize(tuple((BWS, alt((tag("]"), tag("%5D"))))))));
+named!(end_array<Input, Input>, call!(recognize(tuple((BWS, alt((tag("]"), tag("%5D"))))))));
 //*
 //* quotation-mark  = DQUOTE / "%22"
-named!(quotation_mark<&str, &str>, call!(alt((recognize(DQUOTE), tag("%22")))));
+named!(quotation_mark<Input, Input>, call!(alt((recognize(DQUOTE), tag("%22")))));
 //* name-separator  = BWS COLON BWS
-named!(name_separator<&str, &str>, call!(recognize(tuple((BWS, COLON, BWS)))));
+named!(name_separator<Input, Input>, call!(recognize(tuple((BWS, COLON, BWS)))));
 //* value-separator = BWS COMMA BWS
-named!(value_separator<&str, &str>, call!(recognize(tuple((BWS, COMMA, BWS)))));
+named!(value_separator<Input, Input>, call!(recognize(tuple((BWS, COMMA, BWS)))));
 //*
 //* primitiveLiteralInJSON = stringInJSON
 //*                        / numberInJSON
 //*                        / 'true'
 //*                        / 'false'
 //*                        / 'null'
-named!(primitiveLiteralInJSON<&str, &str>, call!(alt((stringInJSON, numberInJSON, tag("true"), tag("false"), tag("null")))));
+named!(primitiveLiteralInJSON<Input, Input>, call!(alt((stringInJSON, numberInJSON, tag("true"), tag("false"), tag("null")))));
 //*
 //* stringInJSON = quotation-mark *charInJSON quotation-mark
-named!(stringInJSON<&str, &str>, call!(recognize(tuple((quotation_mark, many0(charInJSON), quotation_mark)))));
+named!(stringInJSON<Input, Input>, call!(recognize(tuple((quotation_mark, many0(charInJSON), quotation_mark)))));
 //* charInJSON   = qchar-unescaped
 //*              / qchar-JSON-special
 //*              / escape ( quotation-mark
@@ -1690,7 +1966,7 @@ named!(stringInJSON<&str, &str>, call!(recognize(tuple((quotation_mark, many0(ch
 //*                       / 't'             ; tab             U+0009
 //*                       / 'u' 4HEXDIG     ;                 U+XXXX
 //*                       )
-named!(charInJSON<&str, &str>, call!(alt((qchar_unescaped, qchar_JSON_special, recognize(tuple((escape, alt((  quotation_mark
+named!(charInJSON<Input, Input>, call!(alt((qchar_unescaped, qchar_JSON_special, recognize(tuple((escape, alt((  quotation_mark
 													  , escape
 													  , alt((tag("/"), tag("%2F")))
 													  , recognize(one_of("bfnrt"))
@@ -1698,19 +1974,19 @@ named!(charInJSON<&str, &str>, call!(alt((qchar_unescaped, qchar_JSON_special, r
 													  )))))))));
 //*
 //* qchar-JSON-special = SP / ":" / "{" / "}" / "[" / "]" ; some agents put these unencoded into the query part of a URL
-named!(qchar_JSON_special<&str, &str>, call!(alt((SP, recognize(one_of(":{}[]"))))));
+named!(qchar_JSON_special<Input, Input>, call!(alt((SP, recognize(one_of(":{}[]"))))));
 //*
 //* escape = "\" / "%5C"     ; reverse solidus U+005C
-named!(escape<&str, &str>, call!(alt((tag("\\"), tag("%5C")))));
+named!(escape<Input, Input>, call!(alt((tag("\\"), tag("%5C")))));
 //*
 //* numberInJSON = [ "-" ] int [ frac ] [ exp ]
-named!(numberInJSON<&str, &str>, call!(recognize(tuple((opt(tag("-")), int, opt(frac), opt(exp))))));
+named!(numberInJSON<Input, Input>, call!(recognize(tuple((opt(tag("-")), int, opt(frac), opt(exp))))));
 //* int          = "0" / ( oneToNine *DIGIT )
-named!(int<&str, &str>, call!(alt((tag("0"), recognize(tuple((oneToNine, many0(DIGIT))))))));
+named!(int<Input, Input>, call!(alt((tag("0"), recognize(tuple((oneToNine, many0(DIGIT))))))));
 //* frac         = "." 1*DIGIT
-named!(frac<&str, &str>, call!(recognize(tuple((tag("."), many1(DIGIT))))));
+named!(frac<Input, Input>, call!(recognize(tuple((tag("."), many1(DIGIT))))));
 //* exp          = "e" [ "-" / "+" ] 1*DIGIT
-named!(exp<&str, &str>, call!(recognize(tuple((tag_no_case("e"), opt(alt((tag("-"), tag("+")))), many1(DIGIT))))));
+named!(exp<Input, Input>, call!(recognize(tuple((tag_no_case("e"), opt(alt((tag("-"), tag("+")))), many1(DIGIT))))));
 //*
 //*
 //* ;------------------------------------------------------------------------------
@@ -1722,7 +1998,7 @@ named!(exp<&str, &str>, call!(recognize(tuple((tag_no_case("e"), opt(alt((tag("-
 //*                         / qualifiedTypeDefinitionName
 //*                         / qualifiedEnumTypeName
 //*                         / primitiveTypeName
-named!(singleQualifiedTypeName<&str, &str>, call!(alt((qualifiedEntityTypeName
+named!(singleQualifiedTypeName<Input, Input>, call!(alt((qualifiedEntityTypeName
 						 , qualifiedComplexTypeName
 						 , qualifiedTypeDefinitionName
 						 , qualifiedEnumTypeName
@@ -1730,57 +2006,65 @@ named!(singleQualifiedTypeName<&str, &str>, call!(alt((qualifiedEntityTypeName
 //*
 //* qualifiedTypeName = singleQualifiedTypeName
 //*                   / 'Collection' OPEN singleQualifiedTypeName CLOSE
-named!(qualifiedTypeName<&str, &str>, call!(alt((singleQualifiedTypeName
+named!(qualifiedTypeName<Input, Input>, call!(alt((singleQualifiedTypeName
 					   , recognize(tuple((tag("Collection"), OPEN, singleQualifiedTypeName, CLOSE)))))));
 //*
 //* qualifiedEntityTypeName     = namespace "." entityTypeName
-named!(qualifiedEntityTypeName<&str, &str>, call!(recognize(tuple((namespace, tag("."), entityTypeName)))));
+//XXX if an entity type name is also declared as a namespace the namespace parser will consume all
+//input leaving nothing for entityTypeName. Since nom doesn't understand that the child parser has
+//a many0 underneath this will fail to backtrack like a regexp would
+named!(qualifiedEntityTypeName<Input, Input>, call!(recognize(tuple((namespace, tag("."), entityTypeName)))));
+fn qualifiedEntityTypeName_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
+	// let (input, name) = recognize(tuple((namespace, tag("."), entityTypeName)))(input)?;
+	//FIXME recognize multiple namespaces with the caveat above
+	expr(map(namespace, |name| ExprKind::Cast(name.data, Rc::clone(child))))(input)
+}
 //* qualifiedComplexTypeName    = namespace "." complexTypeName
-named!(qualifiedComplexTypeName<&str, &str>, call!(recognize(tuple((namespace, tag("."), complexTypeName)))));
+named!(qualifiedComplexTypeName<Input, Input>, call!(recognize(tuple((namespace, tag("."), complexTypeName)))));
 //* qualifiedTypeDefinitionName = namespace "." typeDefinitionName
-named!(qualifiedTypeDefinitionName<&str, &str>, call!(recognize(tuple((namespace, tag("."), typeDefinitionName)))));
+named!(qualifiedTypeDefinitionName<Input, Input>, call!(recognize(tuple((namespace, tag("."), typeDefinitionName)))));
 //* qualifiedEnumTypeName       = namespace "." enumerationTypeName
-named!(qualifiedEnumTypeName<&str, &str>, call!(recognize(tuple((namespace, tag("."), enumerationTypeName)))));
+named!(qualifiedEnumTypeName<Input, Input>, call!(recognize(tuple((namespace, tag("."), enumerationTypeName)))));
 //*
 //* ; an alias is just a single-part namespace
 //* namespace     = namespacePart *( "." namespacePart )
-named!(namespace<&str, &str>, call!(recognize(tuple((namespacePart, many0(tuple((tag("."), namespacePart))))))));
+named!(namespace<Input, Input>, call!(recognize(tuple((namespacePart, many0(tuple((tag("."), namespacePart))))))));
 //* namespacePart = odataIdentifier
-named!(namespacePart<&str, &str>, call!(recognize(odataIdentifier)));
+named!(namespacePart<Input, Input>, call!(recognize(odataIdentifier)));
 //*
 //* entitySetName       = odataIdentifier
-fn entitySetName_wip<'a>(input: &'a str, ctx: &Parser, container: &'a schema::EntityContainer) -> IResult<&'a str, &'a schema::EntitySet> {
-	map_opt(recognize(odataIdentifier), |name: &str| {
-		if let Some(schema::EntityContainerMember::EntitySet(member)) = container.members.get(name) {
+fn entitySetName_wip<'a>(input: Input<'a>, container: &'a schema::EntityContainer) -> IResult<Input<'a>, &'a schema::EntitySet> {
+	map_opt(recognize(odataIdentifier), |name| {
+		if let Some(schema::EntityContainerMember::EntitySet(member)) = container.members.get(name.data) {
 			return Some(member);
 		}
 		return None;
 	})(input)
 }
-named!(entitySetName<&str, &str>, call!(recognize(odataIdentifier)));
+named!(entitySetName<Input, Input>, call!(recognize(odataIdentifier)));
 //* singletonEntity     = odataIdentifier
-named!(singletonEntity<&str, &str>, call!(recognize(odataIdentifier)));
+named!(singletonEntity<Input, Input>, call!(recognize(odataIdentifier)));
 //* entityTypeName      = odataIdentifier
-named!(entityTypeName<&str, &str>, call!(recognize(odataIdentifier)));
+named!(entityTypeName<Input, Input>, call!(recognize(odataIdentifier)));
 //* complexTypeName     = odataIdentifier
-named!(complexTypeName<&str, &str>, call!(recognize(odataIdentifier)));
+named!(complexTypeName<Input, Input>, call!(recognize(odataIdentifier)));
 //* typeDefinitionName  = odataIdentifier
-named!(typeDefinitionName<&str, &str>, call!(recognize(odataIdentifier)));
+named!(typeDefinitionName<Input, Input>, call!(recognize(odataIdentifier)));
 //* enumerationTypeName = odataIdentifier
-named!(enumerationTypeName<&str, &str>, call!(recognize(odataIdentifier)));
+named!(enumerationTypeName<Input, Input>, call!(recognize(odataIdentifier)));
 //* enumerationMember   = odataIdentifier
-named!(enumerationMember<&str, &str>, call!(recognize(odataIdentifier)));
+named!(enumerationMember<Input, Input>, call!(recognize(odataIdentifier)));
 //* termName            = odataIdentifier
-named!(termName<&str, &str>, call!(recognize(odataIdentifier)));
+named!(termName<Input, Input>, call!(recognize(odataIdentifier)));
 
 //TODO(restrictive + unicode)
 //* ; Note: this pattern is overly restrictive, the normative definition is type TSimpleIdentifier in OData EDM XML Schema
 //* odataIdentifier             = identifierLeadingCharacter *127identifierCharacter
-named!(odataIdentifier<&str, &str>, call!(recognize(tuple((identifierLeadingCharacter, many_m_n(0, 127, identifierCharacter))))));
+named!(odataIdentifier<Input, Input>, call!(recognize(tuple((identifierLeadingCharacter, many_m_n(0, 127, identifierCharacter))))));
 //* identifierLeadingCharacter  = ALPHA / "_"         ; plus Unicode characters from the categories L or Nl
-named!(identifierLeadingCharacter<&str, &str>, call!(alt((ALPHA, tag("_")))));
+named!(identifierLeadingCharacter<Input, Input>, call!(alt((ALPHA, tag("_")))));
 //* identifierCharacter         = ALPHA / "_" / DIGIT ; plus Unicode characters from the categories L, Nl, Nd, Mn, Mc, Pc, or Cf
-named!(identifierCharacter<&str, &str>, call!(alt((ALPHA, tag("_"), DIGIT))));
+named!(identifierCharacter<Input, Input>, call!(alt((ALPHA, tag("_"), DIGIT))));
 //*
 //* primitiveTypeName = 'Edm.' ( 'Binary'
 //*                            / 'Boolean'
@@ -1801,7 +2085,7 @@ named!(identifierCharacter<&str, &str>, call!(alt((ALPHA, tag("_"), DIGIT))));
 //*                            / 'TimeOfDay'
 //*                            / abstractSpatialTypeName [ concreteSpatialTypeName ]
 //*                            )
-named!(primitiveTypeName<&str, &str>, call!(recognize(tuple((tag("Edm."), alt((  tag("Binary")
+named!(primitiveTypeName<Input, Input>, call!(recognize(tuple((tag("Edm."), alt((  tag("Binary")
 									   , tag("Boolean")
 									   , tag("Byte")
 									   , tag("Date")
@@ -1822,7 +2106,7 @@ named!(primitiveTypeName<&str, &str>, call!(recognize(tuple((tag("Edm."), alt(( 
 									)))))));
 //* abstractSpatialTypeName = 'Geography'
 //*                         / 'Geometry'
-named!(abstractSpatialTypeName<&str, &str>, call!(alt((tag("Geography"), tag("Geometry")))));
+named!(abstractSpatialTypeName<Input, Input>, call!(alt((tag("Geography"), tag("Geometry")))));
 //* concreteSpatialTypeName = 'Collection'
 //*                         / 'LineString'
 //*                         / 'MultiLineString'
@@ -1830,7 +2114,7 @@ named!(abstractSpatialTypeName<&str, &str>, call!(alt((tag("Geography"), tag("Ge
 //*                         / 'MultiPolygon'
 //*                         / 'Point'
 //*                         / 'Polygon'
-named!(concreteSpatialTypeName<&str, &str>, call!(alt((  tag("Collection")
+named!(concreteSpatialTypeName<Input, Input>, call!(alt((  tag("Collection")
 						 , tag("LineString")
 						 , tag("MultiLineString")
 						 , tag("MultiPoint")
@@ -1840,31 +2124,31 @@ named!(concreteSpatialTypeName<&str, &str>, call!(alt((  tag("Collection")
 						 ))));
 //*
 //* primitiveProperty       = primitiveKeyProperty / primitiveNonKeyProperty
-named!(primitiveProperty<&str, &str>, call!(alt((primitiveKeyProperty, primitiveNonKeyProperty))));
+named!(primitiveProperty<Input, Input>, call!(alt((primitiveKeyProperty, primitiveNonKeyProperty))));
 //* primitiveKeyProperty    = odataIdentifier
-named!(primitiveKeyProperty<&str, &str>, call!(recognize(odataIdentifier)));
+named!(primitiveKeyProperty<Input, Input>, call!(recognize(odataIdentifier)));
 //* primitiveNonKeyProperty = odataIdentifier
-named!(primitiveNonKeyProperty<&str, &str>, call!(recognize(odataIdentifier)));
+named!(primitiveNonKeyProperty<Input, Input>, call!(recognize(odataIdentifier)));
 //* primitiveColProperty    = odataIdentifier
-named!(primitiveColProperty<&str, &str>, call!(recognize(odataIdentifier)));
+named!(primitiveColProperty<Input, Input>, call!(recognize(odataIdentifier)));
 //* complexProperty         = odataIdentifier
-named!(complexProperty<&str, &str>, call!(recognize(odataIdentifier)));
+named!(complexProperty<Input, Input>, call!(recognize(odataIdentifier)));
 //* complexColProperty      = odataIdentifier
-named!(complexColProperty<&str, &str>, call!(recognize(odataIdentifier)));
+named!(complexColProperty<Input, Input>, call!(recognize(odataIdentifier)));
 //* streamProperty          = odataIdentifier
-named!(streamProperty<&str, &str>, call!(recognize(odataIdentifier)));
+named!(streamProperty<Input, Input>, call!(recognize(odataIdentifier)));
 //*
 //* navigationProperty          = entityNavigationProperty / entityColNavigationProperty
-named!(navigationProperty<&str, &str>, call!(alt((entityNavigationProperty, entityColNavigationProperty))));
+named!(navigationProperty<Input, Input>, call!(alt((entityNavigationProperty, entityColNavigationProperty))));
 //* entityNavigationProperty    = odataIdentifier
-named!(entityNavigationProperty<&str, &str>, call!(recognize(odataIdentifier)));
+named!(entityNavigationProperty<Input, Input>, call!(recognize(odataIdentifier)));
 //* entityColNavigationProperty = odataIdentifier
-named!(entityColNavigationProperty<&str, &str>, call!(recognize(odataIdentifier)));
+named!(entityColNavigationProperty<Input, Input>, call!(recognize(odataIdentifier)));
 //*
 //* action       = odataIdentifier
-named!(action<&str, &str>, call!(recognize(odataIdentifier)));
+named!(action<Input, Input>, call!(recognize(odataIdentifier)));
 //* actionImport = odataIdentifier
-named!(actionImport<&str, &str>, call!(recognize(odataIdentifier)));
+named!(actionImport<Input, Input>, call!(recognize(odataIdentifier)));
 //*
 //* function = entityFunction
 //*          / entityColFunction
@@ -1872,7 +2156,7 @@ named!(actionImport<&str, &str>, call!(recognize(odataIdentifier)));
 //*          / complexColFunction
 //*          / primitiveFunction
 //*          / primitiveColFunction
-named!(function<&str, &str>, call!(alt(( entityFunction
+named!(function<Input, Input>, call!(alt(( entityFunction
 				 , entityColFunction
 				 , complexFunction
 				 , complexColFunction
@@ -1880,30 +2164,30 @@ named!(function<&str, &str>, call!(alt(( entityFunction
 				 , primitiveColFunction))));
 //*
 //* entityFunction       = odataIdentifier
-named!(entityFunction<&str, &str>, call!(recognize(odataIdentifier)));
+named!(entityFunction<Input, Input>, call!(recognize(odataIdentifier)));
 //* entityColFunction    = odataIdentifier
-named!(entityColFunction<&str, &str>, call!(recognize(odataIdentifier)));
+named!(entityColFunction<Input, Input>, call!(recognize(odataIdentifier)));
 //* complexFunction      = odataIdentifier
-named!(complexFunction<&str, &str>, call!(recognize(odataIdentifier)));
+named!(complexFunction<Input, Input>, call!(recognize(odataIdentifier)));
 //* complexColFunction   = odataIdentifier
-named!(complexColFunction<&str, &str>, call!(recognize(odataIdentifier)));
+named!(complexColFunction<Input, Input>, call!(recognize(odataIdentifier)));
 //* primitiveFunction    = odataIdentifier
-named!(primitiveFunction<&str, &str>, call!(recognize(odataIdentifier)));
+named!(primitiveFunction<Input, Input>, call!(recognize(odataIdentifier)));
 //* primitiveColFunction = odataIdentifier
-named!(primitiveColFunction<&str, &str>, call!(recognize(odataIdentifier)));
+named!(primitiveColFunction<Input, Input>, call!(recognize(odataIdentifier)));
 //*
 //* entityFunctionImport       = odataIdentifier
-named!(entityFunctionImport<&str, &str>, call!(recognize(odataIdentifier)));
+named!(entityFunctionImport<Input, Input>, call!(recognize(odataIdentifier)));
 //* entityColFunctionImport    = odataIdentifier
-named!(entityColFunctionImport<&str, &str>, call!(recognize(odataIdentifier)));
+named!(entityColFunctionImport<Input, Input>, call!(recognize(odataIdentifier)));
 //* complexFunctionImport      = odataIdentifier
-named!(complexFunctionImport<&str, &str>, call!(recognize(odataIdentifier)));
+named!(complexFunctionImport<Input, Input>, call!(recognize(odataIdentifier)));
 //* complexColFunctionImport   = odataIdentifier
-named!(complexColFunctionImport<&str, &str>, call!(recognize(odataIdentifier)));
+named!(complexColFunctionImport<Input, Input>, call!(recognize(odataIdentifier)));
 //* primitiveFunctionImport    = odataIdentifier
-named!(primitiveFunctionImport<&str, &str>, call!(recognize(odataIdentifier)));
+named!(primitiveFunctionImport<Input, Input>, call!(recognize(odataIdentifier)));
 //* primitiveColFunctionImport = odataIdentifier
-named!(primitiveColFunctionImport<&str, &str>, call!(recognize(odataIdentifier)));
+named!(primitiveColFunctionImport<Input, Input>, call!(recognize(odataIdentifier)));
 //*
 //*
 //* ;------------------------------------------------------------------------------
@@ -1943,7 +2227,7 @@ named!(primitiveColFunctionImport<&str, &str>, call!(recognize(odataIdentifier))
 //*                  / geometryMultiPolygon
 //*                  / geometryPoint
 //*                  / geometryPolygon
-named!(primitiveLiteral<&str, &str>, call!(alt((
+named!(primitiveLiteral<Input, Input>, call!(alt((
 						alt((  nullValue
 							  , booleanValue
 							  , guidValue
@@ -1980,7 +2264,7 @@ named!(primitiveLiteral<&str, &str>, call!(alt((
 							  , geometryPolygon
 						))
 					))));
-fn primitiveLiteral_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, ast::Lit> {
+fn primitiveLiteral_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::Lit> {
 	alt((
 		alt((
 			// XXX make sure these are ordered in a away that eliminates ambiguity
@@ -2052,7 +2336,7 @@ fn primitiveLiteral_wip<'a>(input: &'a str, ctx: &Parser) -> IResult<&'a str, as
 //*                ; - any XML string for strings in Atom and CSDL documents
 //*                ; - any JSON string for JSON documents
 //TODO(XML & JSON strings)
-named!(primitiveValue<&str, &str>, call!(alt((
+named!(primitiveValue<Input, Input>, call!(alt((
 						alt(( booleanValue
 						       , guidValue
 						       , durationValue
@@ -2082,29 +2366,29 @@ named!(primitiveValue<&str, &str>, call!(alt((
 					))));
 //*
 //* nullValue = 'null'
-named!(nullValue<&str, &str>, call!(tag("null")));
-fn nullValue_wip(input: &str) -> IResult<&str, ast::Lit> {
+named!(nullValue<Input, Input>, call!(tag("null")));
+fn nullValue_wip(input: Input) -> IResult<Input, ast::Lit> {
 	value(ast::Lit::Null, tag("null"))(input)
 }
 //*
 //* ; base64url encoding according to http://tools.ietf.org/html/rfc4648#section-5
 //* binary      = "binary" SQUOTE binaryValue SQUOTE
-named!(binary<&str, &str>, call!(recognize(tuple((tag_no_case("binary"), SQUOTE, binaryValue, SQUOTE)))));
-fn binary_wip(input: &str) -> IResult<&str, ast::Lit> {
+named!(binary<Input, Input>, call!(recognize(tuple((tag_no_case("binary"), SQUOTE, binaryValue, SQUOTE)))));
+fn binary_wip(input: Input) -> IResult<Input, ast::Lit> {
 	preceded(tag_no_case("binary"), delimited(SQUOTE, map(binaryValue, |b| ast::Lit::Binary(b.to_string())), SQUOTE))(input)
 }
 //* binaryValue = *(4base64char) [ base64b16  / base64b8 ]
-named!(binaryValue<&str, &str>, call!(recognize(tuple((many0(many_m_n(4, 4, base64char)), opt(alt((base64b16, base64b8))))))));
+named!(binaryValue<Input, Input>, call!(recognize(tuple((many0(many_m_n(4, 4, base64char)), opt(alt((base64b16, base64b8))))))));
 //* base64b16   = 2base64char ( 'A' / 'E' / 'I' / 'M' / 'Q' / 'U' / 'Y' / 'c' / 'g' / 'k' / 'o' / 's' / 'w' / '0' / '4' / '8' )   [ "=" ]
-named!(base64b16<&str, &str>, call!(recognize(tuple((many_m_n(2, 2, base64char), one_of("AEIMQUYcgkosw048"), opt(tag("=")))))));
+named!(base64b16<Input, Input>, call!(recognize(tuple((many_m_n(2, 2, base64char), one_of("AEIMQUYcgkosw048"), opt(tag("=")))))));
 //* base64b8    = base64char ( 'A' / 'Q' / 'g' / 'w' ) [ "==" ]
-named!(base64b8<&str, &str>, call!(recognize(tuple((base64char, one_of("AQgw"), opt(tag("==")))))));
+named!(base64b8<Input, Input>, call!(recognize(tuple((base64char, one_of("AQgw"), opt(tag("==")))))));
 //* base64char  = ALPHA / DIGIT / "-" / "_"
-named!(base64char<&str, &str>, call!(alt((ALPHA, DIGIT, tag("-"), tag("_")))));
+named!(base64char<Input, Input>, call!(alt((ALPHA, DIGIT, tag("-"), tag("_")))));
 //*
 //* booleanValue = "true" / "false"
-named!(booleanValue<&str, &str>, call!(alt((tag_no_case("true"), tag_no_case("false")))));
-fn booleanValue_wip(input: &str) -> IResult<&str, ast::Lit> {
+named!(booleanValue<Input, Input>, call!(alt((tag_no_case("true"), tag_no_case("false")))));
+fn booleanValue_wip(input: Input) -> IResult<Input, ast::Lit> {
 	alt((
 		value(ast::Lit::Boolean(true), tag_no_case("true")),
 		value(ast::Lit::Boolean(false), tag_no_case("false")),
@@ -2112,60 +2396,60 @@ fn booleanValue_wip(input: &str) -> IResult<&str, ast::Lit> {
 }
 //*
 //* decimalValue = [ SIGN ] 1*DIGIT [ "." 1*DIGIT ] [ "e" [ SIGN ] 1*DIGIT ] / nanInfinity
-named!(decimalValue<&str, &str>, call!(alt((recognize(tuple((opt(SIGN),
+named!(decimalValue<Input, Input>, call!(alt((recognize(tuple((opt(SIGN),
 							many1(DIGIT),
 						   	opt(tuple((tag("."), many1(DIGIT)))),
 						   	opt(tuple((tag_no_case("e"), opt(SIGN), many1(DIGIT))))
 							)))
 				      , nanInfinity))));
 //* doubleValue  = decimalValue ; IEEE 754 binary64 floating-point number (15-17 decimal digits)
-named!(doubleValue<&str, &str>, call!(recognize(decimalValue)));
+named!(doubleValue<Input, Input>, call!(recognize(decimalValue)));
 //* singleValue  = decimalValue ; IEEE 754 binary32 floating-point number (6-9 decimal digits)
-named!(singleValue<&str, &str>, call!(recognize(decimalValue)));
+named!(singleValue<Input, Input>, call!(recognize(decimalValue)));
 //* nanInfinity  = 'NaN' / '-INF' / 'INF'
-named!(nanInfinity<&str, &str>, call!(alt((tag("NaN"), tag("-INF"), tag("INF")))));
+named!(nanInfinity<Input, Input>, call!(alt((tag("NaN"), tag("-INF"), tag("INF")))));
 //*
 //* guidValue = 8HEXDIG "-" 4HEXDIG "-" 4HEXDIG "-" 4HEXDIG "-" 12HEXDIG
-named!(guidValue<&str, &str>, call!(recognize(tuple((many_m_n(8, 8, HEXDIG), tag("-"),
+named!(guidValue<Input, Input>, call!(recognize(tuple((many_m_n(8, 8, HEXDIG), tag("-"),
 						many_m_n(4, 4, HEXDIG), tag("-"),
 						many_m_n(4, 4, HEXDIG), tag("-"),
 						many_m_n(4, 4, HEXDIG), tag("-"),
 						many_m_n(12, 12, HEXDIG)
 						)))));
-fn guidValue_wip(input: &str) -> IResult<&str, ast::Lit> {
-	map(map_res(take(uuid::adapter::Hyphenated::LENGTH), Uuid::from_str), ast::Lit::Guid)(input)
+fn guidValue_wip(input: Input) -> IResult<Input, ast::Lit> {
+	map(map_res(take(uuid::adapter::Hyphenated::LENGTH), |res: Input| Uuid::from_str(res.data)), ast::Lit::Guid)(input)
 }
 //*
 //* byteValue  = 1*3DIGIT           ; numbers in the range from 0 to 255
-named!(byteValue<&str, &str>, call!(recognize(many_m_n(1, 3, DIGIT))));
+named!(byteValue<Input, Input>, call!(recognize(many_m_n(1, 3, DIGIT))));
 //* sbyteValue = [ SIGN ] 1*3DIGIT  ; numbers in the range from -128 to 127
-named!(sbyteValue<&str, &str>, call!(recognize(tuple((opt(SIGN), many_m_n(1, 3, DIGIT))))));
+named!(sbyteValue<Input, Input>, call!(recognize(tuple((opt(SIGN), many_m_n(1, 3, DIGIT))))));
 //* int16Value = [ SIGN ] 1*5DIGIT  ; numbers in the range from -32768 to 32767
-named!(int16Value<&str, &str>, call!(recognize(tuple((opt(SIGN), many_m_n(1, 5, DIGIT))))));
+named!(int16Value<Input, Input>, call!(recognize(tuple((opt(SIGN), many_m_n(1, 5, DIGIT))))));
 //* int32Value = [ SIGN ] 1*10DIGIT ; numbers in the range from -2147483648 to 2147483647
-named!(int32Value<&str, &str>, call!(recognize(tuple((opt(SIGN), many_m_n(1, 10, DIGIT))))));
+named!(int32Value<Input, Input>, call!(recognize(tuple((opt(SIGN), many_m_n(1, 10, DIGIT))))));
 //* int64Value = [ SIGN ] 1*19DIGIT ; numbers in the range from -9223372036854775808 to 9223372036854775807
-named!(int64Value<&str, &str>, call!(recognize(tuple((opt(SIGN), many_m_n(1, 19, DIGIT))))));
+named!(int64Value<Input, Input>, call!(recognize(tuple((opt(SIGN), many_m_n(1, 19, DIGIT))))));
 //*
 //* string           = SQUOTE *( SQUOTE-in-string / pchar-no-SQUOTE ) SQUOTE
 // errata: pchar-no-SQUOTE includes special characters like &, =, and $. Those should be encoded
-named!(string<&str, &str>, call!(recognize(tuple((SQUOTE, many0(alt((recognize(SQUOTE_in_string), recognize(pchar_no_SQUOTE)))), SQUOTE)))));
+named!(string<Input, Input>, call!(recognize(tuple((SQUOTE, many0(alt((recognize(SQUOTE_in_string), recognize(pchar_no_SQUOTE)))), SQUOTE)))));
 //* SQUOTE-in-string = SQUOTE SQUOTE ; two consecutive single quotes represent one within a string literal
-named!(SQUOTE_in_string<&str, &str>, call!(recognize(tuple((SQUOTE, SQUOTE)))));
+named!(SQUOTE_in_string<Input, Input>, call!(recognize(tuple((SQUOTE, SQUOTE)))));
 //*
 //* dateValue = year "-" month "-" day
-named!(dateValue<&str, &str>, call!(recognize(tuple((year, tag("-"), month, tag("-"), day)))));
-fn dateValue_wip(input: &str) -> IResult<&str, ast::Lit> {
+named!(dateValue<Input, Input>, call!(recognize(tuple((year, tag("-"), month, tag("-"), day)))));
+fn dateValue_wip(input: Input) -> IResult<Input, ast::Lit> {
 	let (input, (year, _, month, _, day)) = tuple((year_wip, tag("-"), month_wip, tag("-"), day_wip))(input)?;
 	Ok((input, ast::Lit::Date(year, month, day)))
 }
 //*
 //* dateTimeOffsetValue = year "-" month "-" day "T" hour ":" minute [ ":" second [ "." fractionalSeconds ] ] ( "Z" / SIGN hour ":" minute )
-named!(dateTimeOffsetValue<&str, &str>, call!(recognize(tuple((year, tag("-"), month, tag("-"), day, tag_no_case("T"), hour, tag(":"), minute,
+named!(dateTimeOffsetValue<Input, Input>, call!(recognize(tuple((year, tag("-"), month, tag("-"), day, tag_no_case("T"), hour, tag(":"), minute,
 							  opt(tuple((tag(":"), second, opt(tuple((tag("."), fractionalSeconds)))))),
 							  alt((tag_no_case("Z"), recognize(tuple((SIGN, hour, tag(":"), minute)))))
 							  )))));
-fn dateTimeOffsetValue_wip(input: &str) -> IResult<&str, ast::Lit> {
+fn dateTimeOffsetValue_wip(input: Input) -> IResult<Input, ast::Lit> {
 	let (input, (year, _, month, _, day)) = tuple((year_wip, tag("-"), month_wip, tag("-"), day_wip))(input)?;
 	let (input, (_, hour, _, minute)) = tuple((tag("T"), hour_wip, tag(":"), minute_wip))(input)?;
 
@@ -2175,11 +2459,11 @@ fn dateTimeOffsetValue_wip(input: &str) -> IResult<&str, ast::Lit> {
 
 //*
 //* duration      = [ "duration" ] SQUOTE durationValue SQUOTE
-named!(duration<&str, &str>, call!(recognize(tuple((opt(tag_no_case("duration")), SQUOTE, durationValue, SQUOTE)))));
+named!(duration<Input, Input>, call!(recognize(tuple((opt(tag_no_case("duration")), SQUOTE, durationValue, SQUOTE)))));
 //* durationValue = [ SIGN ] "P" [ 1*DIGIT "D" ] [ "T" [ 1*DIGIT "H" ] [ 1*DIGIT "M" ] [ 1*DIGIT [ "." 1*DIGIT ] "S" ] ]
 //*      ; the above is an approximation of the rules for an xml dayTimeDuration.
 //*      ; see the lexical representation for dayTimeDuration in http://www.w3.org/TR/xmlschema11-2#dayTimeDuration for more information
-named!(durationValue<&str, &str>, call!(recognize(tuple((opt(SIGN),
+named!(durationValue<Input, Input>, call!(recognize(tuple((opt(SIGN),
 						    tag_no_case("P"),
 						    opt(tuple((many1(DIGIT), tag_no_case("D")))),
 						    opt(tuple((tag_no_case("T"),
@@ -2190,73 +2474,73 @@ named!(durationValue<&str, &str>, call!(recognize(tuple((opt(SIGN),
 
 //*
 //* timeOfDayValue = hour ":" minute [ ":" second [ "." fractionalSeconds ] ]
-named!(timeOfDayValue<&str, &str>, call!(recognize(tuple((hour, tag(":"), minute, opt(tuple((tag(":"), second, opt(tuple((tag("."), fractionalSeconds)))))))))));
+named!(timeOfDayValue<Input, Input>, call!(recognize(tuple((hour, tag(":"), minute, opt(tuple((tag(":"), second, opt(tuple((tag("."), fractionalSeconds)))))))))));
 //*
 //* oneToNine       = "1" / "2" / "3" / "4" / "5" / "6" / "7" / "8" / "9"
-named!(oneToNine<&str, &str>, call!(recognize(one_of("123456789"))));
+named!(oneToNine<Input, Input>, call!(recognize(one_of("123456789"))));
 //* zeroToFiftyNine = ( "0" / "1" / "2" / "3" / "4" / "5" ) DIGIT
-named!(zeroToFiftyNine<&str, &str>, call!(recognize(tuple((one_of("012345"), DIGIT)))));
+named!(zeroToFiftyNine<Input, Input>, call!(recognize(tuple((one_of("012345"), DIGIT)))));
 //* year  = [ "-" ] ( "0" 3DIGIT / oneToNine 3*DIGIT )
-named!(year<&str, &str>, call!(recognize(tuple((opt(tag("-")), alt((recognize(tuple((tag("0"), many_m_n(3, 3, DIGIT)))), recognize(tuple((oneToNine, many_m_n(3, 3, DIGIT)))))))))));
-fn year_wip(input: &str) -> IResult<&str, i16> {
-	map_res(recognize(tuple((opt(tag("-")), take_while_m_n(4, 4, |c: char| c.is_digit(10))))), i16::from_str)(input)
+named!(year<Input, Input>, call!(recognize(tuple((opt(tag("-")), alt((recognize(tuple((tag("0"), many_m_n(3, 3, DIGIT)))), recognize(tuple((oneToNine, many_m_n(3, 3, DIGIT)))))))))));
+fn year_wip(input: Input) -> IResult<Input, i16> {
+	map_res(recognize(tuple((opt(tag("-")), take_while_m_n(4, 4, |c: char| c.is_digit(10))))), |res: Input| i16::from_str(res.data))(input)
 }
 
 //* month = "0" oneToNine
 //*       / "1" ( "0" / "1" / "2" )
-named!(month<&str, &str>, call!(alt((  recognize(tuple((tag("0"), oneToNine)))
+named!(month<Input, Input>, call!(alt((  recognize(tuple((tag("0"), oneToNine)))
 			       , recognize(tuple((tag("1"), one_of("012"))))
 			       ))));
-fn month_wip(input: &str) -> IResult<&str, u8> {
-	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), u8::from_str), |m| (1 <= *m && *m <= 12))(input)
+fn month_wip(input: Input) -> IResult<Input, u8> {
+	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), |res: Input| u8::from_str(res.data)), |m| (1 <= *m && *m <= 12))(input)
 }
 //* day   = "0" oneToNine
 //*       / ( "1" / "2" ) DIGIT
 //*       / "3" ( "0" / "1" )
-named!(day<&str, &str>, call!(alt((  recognize(tuple((tag("0"), oneToNine)))
+named!(day<Input, Input>, call!(alt((  recognize(tuple((tag("0"), oneToNine)))
 			     , recognize(tuple((one_of("12"), DIGIT)))
 			     , recognize(tuple((tag("3"), one_of("01"))))
 			     ))));
-fn day_wip(input: &str) -> IResult<&str, u8> {
-	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), u8::from_str), |m| (1 <= *m && *m <= 31))(input)
+fn day_wip(input: Input) -> IResult<Input, u8> {
+	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), |res: Input| u8::from_str(res.data)), |m| (1 <= *m && *m <= 31))(input)
 }
 //* hour   = ( "0" / "1" ) DIGIT
 //*        / "2" ( "0" / "1" / "2" / "3" )
-named!(hour<&str, &str>, call!(alt((  recognize(tuple((one_of("01"), DIGIT)))
+named!(hour<Input, Input>, call!(alt((  recognize(tuple((one_of("01"), DIGIT)))
 			      , recognize(tuple((tag("2"), one_of("0123"))))
 			      ))));
-fn hour_wip(input: &str) -> IResult<&str, u8> {
-	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), u8::from_str), |m| *m <= 23)(input)
+fn hour_wip(input: Input) -> IResult<Input, u8> {
+	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), |res: Input| u8::from_str(res.data)), |m| *m <= 23)(input)
 }
 //* minute = zeroToFiftyNine
-named!(minute<&str, &str>, call!(recognize(zeroToFiftyNine)));
-fn minute_wip(input: &str) -> IResult<&str, u8> {
-	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), u8::from_str), |m| *m <= 59)(input)
+named!(minute<Input, Input>, call!(recognize(zeroToFiftyNine)));
+fn minute_wip(input: Input) -> IResult<Input, u8> {
+	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), |res: Input| u8::from_str(res.data)), |m| *m <= 59)(input)
 }
 //* second = zeroToFiftyNine
-named!(second<&str, &str>, call!(recognize(zeroToFiftyNine)));
-fn second_wip(input: &str) -> IResult<&str, u8> {
-	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), u8::from_str), |m| *m <= 59)(input)
+named!(second<Input, Input>, call!(recognize(zeroToFiftyNine)));
+fn second_wip(input: Input) -> IResult<Input, u8> {
+	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), |res: Input| u8::from_str(res.data)), |m| *m <= 59)(input)
 }
 //* fractionalSeconds = 1*12DIGIT
-named!(fractionalSeconds<&str, &str>, call!(recognize(many_m_n(1, 12, DIGIT))));
+named!(fractionalSeconds<Input, Input>, call!(recognize(many_m_n(1, 12, DIGIT))));
 //*
 //* enum            = [ qualifiedEnumTypeName ] SQUOTE enumValue SQUOTE
-named!(_enum<&str, &str>, call!(recognize(tuple((opt(qualifiedEntityTypeName), SQUOTE, enumValue, SQUOTE)))));
+named!(_enum<Input, Input>, call!(recognize(tuple((opt(qualifiedEntityTypeName), SQUOTE, enumValue, SQUOTE)))));
 //* enumValue       = singleEnumValue *( COMMA singleEnumValue )
-named!(enumValue<&str, &str>, call!(recognize(tuple((singleEnumValue, many0(tuple((COMMA, singleEnumValue))))))));
+named!(enumValue<Input, Input>, call!(recognize(tuple((singleEnumValue, many0(tuple((COMMA, singleEnumValue))))))));
 //* singleEnumValue = enumerationMember / enumMemberValue
-named!(singleEnumValue<&str, &str>, call!(alt((enumerationMember, enumMemberValue))));
+named!(singleEnumValue<Input, Input>, call!(alt((enumerationMember, enumMemberValue))));
 //* enumMemberValue = int64Value
-named!(enumMemberValue<&str, &str>, call!(recognize(int64Value)));
+named!(enumMemberValue<Input, Input>, call!(recognize(int64Value)));
 
 
 //* geographyCollection   = geographyPrefix SQUOTE fullCollectionLiteral SQUOTE
-named!(geographyCollection<&str, &str>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullCollectionLiteral, SQUOTE)))));
+named!(geographyCollection<Input, Input>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullCollectionLiteral, SQUOTE)))));
 //* fullCollectionLiteral = sridLiteral collectionLiteral
-named!(fullCollectionLiteral<&str, &str>, call!(recognize(tuple((sridLiteral, collectionLiteral)))));
+named!(fullCollectionLiteral<Input, Input>, call!(recognize(tuple((sridLiteral, collectionLiteral)))));
 //* collectionLiteral     = "Collection(" geoLiteral *( COMMA geoLiteral ) CLOSE
-named!(collectionLiteral<&str, &str>, call!(recognize(tuple((tag_no_case("Collection("), geoLiteral, many0(tuple((COMMA, geoLiteral))), CLOSE)))));
+named!(collectionLiteral<Input, Input>, call!(recognize(tuple((tag_no_case("Collection("), geoLiteral, many0(tuple((COMMA, geoLiteral))), CLOSE)))));
 //* geoLiteral            = collectionLiteral
 //*                       / lineStringLiteral
 //*                       / multiPointLiteral
@@ -2264,7 +2548,7 @@ named!(collectionLiteral<&str, &str>, call!(recognize(tuple((tag_no_case("Collec
 //*                       / multiPolygonLiteral
 //*                       / pointLiteral
 //*                       / polygonLiteral
-named!(geoLiteral<&str, &str>, call!(alt((  collectionLiteral
+named!(geoLiteral<Input, Input>, call!(alt((  collectionLiteral
 				    , lineStringLiteral
 				    , multiPointLiteral
 				    , multiLineStringLiteral
@@ -2273,81 +2557,81 @@ named!(geoLiteral<&str, &str>, call!(alt((  collectionLiteral
 				    , polygonLiteral))));
 //*
 //* geographyLineString   = geographyPrefix SQUOTE fullLineStringLiteral SQUOTE
-named!(geographyLineString<&str, &str>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullLineStringLiteral, SQUOTE)))));
+named!(geographyLineString<Input, Input>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullLineStringLiteral, SQUOTE)))));
 //* fullLineStringLiteral = sridLiteral lineStringLiteral
-named!(fullLineStringLiteral<&str, &str>, call!(recognize(tuple((sridLiteral, lineStringLiteral)))));
+named!(fullLineStringLiteral<Input, Input>, call!(recognize(tuple((sridLiteral, lineStringLiteral)))));
 //* lineStringLiteral     = "LineString" lineStringData
-named!(lineStringLiteral<&str, &str>, call!(recognize(tuple((tag_no_case("LineString"), lineStringData)))));
+named!(lineStringLiteral<Input, Input>, call!(recognize(tuple((tag_no_case("LineString"), lineStringData)))));
 //* lineStringData        = OPEN positionLiteral 1*( COMMA positionLiteral ) CLOSE
-named!(lineStringData<&str, &str>, call!(recognize(tuple((OPEN, positionLiteral, many1(tuple((COMMA, positionLiteral))), CLOSE)))));
+named!(lineStringData<Input, Input>, call!(recognize(tuple((OPEN, positionLiteral, many1(tuple((COMMA, positionLiteral))), CLOSE)))));
 //*
 //* geographyMultiLineString   = geographyPrefix SQUOTE fullMultiLineStringLiteral SQUOTE
-named!(geographyMultiLineString<&str, &str>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullMultiLineStringLiteral, SQUOTE)))));
+named!(geographyMultiLineString<Input, Input>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullMultiLineStringLiteral, SQUOTE)))));
 //* fullMultiLineStringLiteral = sridLiteral multiLineStringLiteral
-named!(fullMultiLineStringLiteral<&str, &str>, call!(recognize(tuple((sridLiteral, multiLineStringLiteral)))));
+named!(fullMultiLineStringLiteral<Input, Input>, call!(recognize(tuple((sridLiteral, multiLineStringLiteral)))));
 //* multiLineStringLiteral     = "MultiLineString(" [ lineStringData *( COMMA lineStringData ) ] CLOSE
-named!(multiLineStringLiteral<&str, &str>, call!(recognize(tuple((tag_no_case("MultiLineString("), opt(tuple((lineStringData, many0(tuple((COMMA, lineStringData)))))), CLOSE)))));
+named!(multiLineStringLiteral<Input, Input>, call!(recognize(tuple((tag_no_case("MultiLineString("), opt(tuple((lineStringData, many0(tuple((COMMA, lineStringData)))))), CLOSE)))));
 //*
 //* geographyMultiPoint   = geographyPrefix SQUOTE fullMultiPointLiteral SQUOTE
-named!(geographyMultiPoint<&str, &str>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullMultiPointLiteral, SQUOTE)))));
+named!(geographyMultiPoint<Input, Input>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullMultiPointLiteral, SQUOTE)))));
 //* fullMultiPointLiteral = sridLiteral multiPointLiteral
-named!(fullMultiPointLiteral<&str, &str>, call!(recognize(tuple((sridLiteral, multiPointLiteral)))));
+named!(fullMultiPointLiteral<Input, Input>, call!(recognize(tuple((sridLiteral, multiPointLiteral)))));
 //* multiPointLiteral     = "MultiPoint(" [ pointData *( COMMA pointData ) ] CLOSE
-named!(multiPointLiteral<&str, &str>, call!(recognize(tuple((tag_no_case("MultiPoint("), opt(tuple((pointData, many0(tuple((COMMA, pointData)))))), CLOSE)))));
+named!(multiPointLiteral<Input, Input>, call!(recognize(tuple((tag_no_case("MultiPoint("), opt(tuple((pointData, many0(tuple((COMMA, pointData)))))), CLOSE)))));
 //*
 //* geographyMultiPolygon   = geographyPrefix SQUOTE fullMultiPolygonLiteral SQUOTE
-named!(geographyMultiPolygon<&str, &str>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullMultiPolygonLiteral, SQUOTE)))));
+named!(geographyMultiPolygon<Input, Input>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullMultiPolygonLiteral, SQUOTE)))));
 //* fullMultiPolygonLiteral = sridLiteral multiPolygonLiteral
-named!(fullMultiPolygonLiteral<&str, &str>, call!(recognize(tuple((sridLiteral, multiPolygonLiteral)))));
+named!(fullMultiPolygonLiteral<Input, Input>, call!(recognize(tuple((sridLiteral, multiPolygonLiteral)))));
 //* multiPolygonLiteral     = "MultiPolygon(" [ polygonData *( COMMA polygonData ) ] CLOSE
-named!(multiPolygonLiteral<&str, &str>, call!(recognize(tuple((tag_no_case("MultiPolygon("), opt(tuple((polygonData, many0(tuple((COMMA, polygonData)))))), CLOSE)))));
+named!(multiPolygonLiteral<Input, Input>, call!(recognize(tuple((tag_no_case("MultiPolygon("), opt(tuple((polygonData, many0(tuple((COMMA, polygonData)))))), CLOSE)))));
 //*
 //* geographyPoint   = geographyPrefix SQUOTE fullPointLiteral SQUOTE
-named!(geographyPoint<&str, &str>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullPointLiteral, SQUOTE)))));
+named!(geographyPoint<Input, Input>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullPointLiteral, SQUOTE)))));
 //* fullPointLiteral = sridLiteral pointLiteral
-named!(fullPointLiteral<&str, &str>, call!(recognize(tuple((sridLiteral, pointLiteral)))));
+named!(fullPointLiteral<Input, Input>, call!(recognize(tuple((sridLiteral, pointLiteral)))));
 //* sridLiteral      = "SRID" EQ 1*5DIGIT SEMI
-named!(sridLiteral<&str, &str>, call!(recognize(tuple((tag_no_case("SRID"), EQ, many_m_n(1, 5, DIGIT), SEMI)))));
+named!(sridLiteral<Input, Input>, call!(recognize(tuple((tag_no_case("SRID"), EQ, many_m_n(1, 5, DIGIT), SEMI)))));
 //* pointLiteral     ="Point" pointData
-named!(pointLiteral<&str, &str>, call!(recognize(tuple((tag_no_case("Point"), pointData)))));
+named!(pointLiteral<Input, Input>, call!(recognize(tuple((tag_no_case("Point"), pointData)))));
 //* pointData        = OPEN positionLiteral CLOSE
-named!(pointData<&str, &str>, call!(recognize(tuple((OPEN, positionLiteral, CLOSE)))));
+named!(pointData<Input, Input>, call!(recognize(tuple((OPEN, positionLiteral, CLOSE)))));
 //* positionLiteral  = doubleValue SP doubleValue  ; longitude, then latitude
-named!(positionLiteral<&str, &str>, call!(recognize(tuple((doubleValue, SP, doubleValue)))));
+named!(positionLiteral<Input, Input>, call!(recognize(tuple((doubleValue, SP, doubleValue)))));
 //*
 //* geographyPolygon   = geographyPrefix SQUOTE fullPolygonLiteral SQUOTE
-named!(geographyPolygon<&str, &str>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullPolygonLiteral, SQUOTE)))));
+named!(geographyPolygon<Input, Input>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullPolygonLiteral, SQUOTE)))));
 //* fullPolygonLiteral = sridLiteral polygonLiteral
-named!(fullPolygonLiteral<&str, &str>, call!(recognize(tuple((sridLiteral, polygonLiteral)))));
+named!(fullPolygonLiteral<Input, Input>, call!(recognize(tuple((sridLiteral, polygonLiteral)))));
 //* polygonLiteral     = "Polygon" polygonData
-named!(polygonLiteral<&str, &str>, call!(recognize(tuple((tag_no_case("Polygon"), polygonData)))));
+named!(polygonLiteral<Input, Input>, call!(recognize(tuple((tag_no_case("Polygon"), polygonData)))));
 //* polygonData        = OPEN ringLiteral *( COMMA ringLiteral ) CLOSE
-named!(polygonData<&str, &str>, call!(recognize(tuple((OPEN, ringLiteral, many0(tuple((COMMA, ringLiteral))), CLOSE)))));
+named!(polygonData<Input, Input>, call!(recognize(tuple((OPEN, ringLiteral, many0(tuple((COMMA, ringLiteral))), CLOSE)))));
 //* ringLiteral        = OPEN positionLiteral *( COMMA positionLiteral ) CLOSE
 //*                    ; Within each ringLiteral, the first and last positionLiteral elements MUST be an exact syntactic match to each other.
 //*                    ; Within the polygonData, the ringLiterals MUST specify their points in appropriate winding order.
 //*                    ; In order of traversal, points to the left side of the ring are interpreted as being in the polygon.
-named!(ringLiteral<&str, &str>, call!(recognize(tuple((OPEN, positionLiteral, many0(tuple((COMMA, positionLiteral))), CLOSE)))));
+named!(ringLiteral<Input, Input>, call!(recognize(tuple((OPEN, positionLiteral, many0(tuple((COMMA, positionLiteral))), CLOSE)))));
 //*
 //* geometryCollection      = geometryPrefix SQUOTE fullCollectionLiteral      SQUOTE
-named!(geometryCollection<&str, &str>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullCollectionLiteral, SQUOTE)))));
+named!(geometryCollection<Input, Input>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullCollectionLiteral, SQUOTE)))));
 //* geometryLineString      = geometryPrefix SQUOTE fullLineStringLiteral      SQUOTE
-named!(geometryLineString<&str, &str>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullLineStringLiteral, SQUOTE)))));
+named!(geometryLineString<Input, Input>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullLineStringLiteral, SQUOTE)))));
 //* geometryMultiLineString = geometryPrefix SQUOTE fullMultiLineStringLiteral SQUOTE
-named!(geometryMultiLineString<&str, &str>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullMultiLineStringLiteral, SQUOTE)))));
+named!(geometryMultiLineString<Input, Input>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullMultiLineStringLiteral, SQUOTE)))));
 //* geometryMultiPoint      = geometryPrefix SQUOTE fullMultiPointLiteral      SQUOTE
-named!(geometryMultiPoint<&str, &str>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullMultiPointLiteral, SQUOTE)))));
+named!(geometryMultiPoint<Input, Input>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullMultiPointLiteral, SQUOTE)))));
 //* geometryMultiPolygon    = geometryPrefix SQUOTE fullMultiPolygonLiteral    SQUOTE
-named!(geometryMultiPolygon<&str, &str>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullMultiPolygonLiteral, SQUOTE)))));
+named!(geometryMultiPolygon<Input, Input>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullMultiPolygonLiteral, SQUOTE)))));
 //* geometryPoint           = geometryPrefix SQUOTE fullPointLiteral           SQUOTE
-named!(geometryPoint<&str, &str>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullPointLiteral, SQUOTE)))));
+named!(geometryPoint<Input, Input>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullPointLiteral, SQUOTE)))));
 //* geometryPolygon         = geometryPrefix SQUOTE fullPolygonLiteral         SQUOTE
-named!(geometryPolygon<&str, &str>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullPolygonLiteral, SQUOTE)))));
+named!(geometryPolygon<Input, Input>, call!(recognize(tuple((geometryPrefix, SQUOTE, fullPolygonLiteral, SQUOTE)))));
 //*
 //* geographyPrefix = "geography"
-named!(geographyPrefix<&str, &str>, call!(tag_no_case("geography")));
+named!(geographyPrefix<Input, Input>, call!(tag_no_case("geography")));
 //* geometryPrefix  = "geometry"
-named!(geometryPrefix<&str, &str>, call!(tag_no_case("geometry")));
+named!(geometryPrefix<Input, Input>, call!(tag_no_case("geometry")));
 //*
 //*
 
@@ -2418,15 +2702,15 @@ named!(geometryPrefix<&str, &str>, call!(tag_no_case("geometry")));
 //* ;quoted-string  = DQUOTE *( qdtext / quoted-pair ) DQUOTE
 //* ;qdtext         = %x21 / %x23-5B / %x5D-7E / obs-text / OWS
 //* obs-text       = %x80-FF
-named!(obs_text<&str, &str>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii() && (*chr as u8) >= 0x80))));
+named!(obs_text<Input, Input>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii() && (*chr as u8) >= 0x80))));
 //* ;quoted-pair    = "\" ( HTAB / SP / VCHAR / obs-text )
 //*
 //* OWS   = *( SP / HTAB )  ; "optional" whitespace
-named!(OWS<&str, &str>, call!(recognize(many0(alt((SP, HTAB))))));
+named!(OWS<Input, Input>, call!(recognize(many0(alt((SP, HTAB))))));
 //* BWS-h = *( SP / HTAB )  ; "bad" whitespace in header values
-named!(BWS_h<&str, &str>, call!(recognize(many0(alt((SP, HTAB))))));
+named!(BWS_h<Input, Input>, call!(recognize(many0(alt((SP, HTAB))))));
 //* EQ-h  = BWS-h EQ BWS-h
-named!(EQ_h<&str, &str>, call!(recognize(tuple((BWS_h, EQ, BWS_h)))));
+named!(EQ_h<Input, Input>, call!(recognize(tuple((BWS_h, EQ, BWS_h)))));
 //*
 //*
 //* ;------------------------------------------------------------------------------
@@ -2434,31 +2718,31 @@ named!(EQ_h<&str, &str>, call!(recognize(tuple((BWS_h, EQ, BWS_h)))));
 //* ;------------------------------------------------------------------------------
 //*
 //* RWS = 1*( SP / HTAB / "%20" / "%09" )  ; "required" whitespace
-named!(RWS<&str, &str>, call!(recognize(many1(alt((SP, HTAB, tag("%20"), tag("%09")))))));
+named!(RWS<Input, Input>, call!(recognize(many1(alt((SP, HTAB, tag("%20"), tag("%09")))))));
 //* BWS =  *( SP / HTAB / "%20" / "%09" )  ; "bad" whitespace
-named!(BWS<&str, &str>, call!(recognize(many0(alt((SP, HTAB, tag("%20"), tag("%09")))))));
+named!(BWS<Input, Input>, call!(recognize(many0(alt((SP, HTAB, tag("%20"), tag("%09")))))));
 //*
 //* AT     = "@" / "%40"
-named!(AT<&str, &str>, call!(alt((tag("@"), tag("%40")))));
+named!(AT<Input, Input>, call!(alt((tag("@"), tag("%40")))));
 //* COLON  = ":" / "%3A"
-named!(COLON<&str, &str>, call!(alt((tag(":"), tag("%3A")))));
+named!(COLON<Input, Input>, call!(alt((tag(":"), tag("%3A")))));
 //* COMMA  = "," / "%2C"
-named!(COMMA<&str, &str>, call!(alt((tag(","), tag("%2C")))));
+named!(COMMA<Input, Input>, call!(alt((tag(","), tag("%2C")))));
 //* EQ     = "="
-named!(EQ<&str, &str>, call!(tag("=")));
+named!(EQ<Input, Input>, call!(tag("=")));
 //* SIGN   = "+" / "%2B" / "-"
-named!(SIGN<&str, &str>, call!(alt((tag("+"), tag("%3B"), tag("-")))));
+named!(SIGN<Input, Input>, call!(alt((tag("+"), tag("%3B"), tag("-")))));
 //* SEMI   = ";" / "%3B"
-named!(SEMI<&str, &str>, call!(alt((tag(";"), tag("%3B")))));
+named!(SEMI<Input, Input>, call!(alt((tag(";"), tag("%3B")))));
 //* STAR   = "*" / "%2A"
-named!(STAR<&str, &str>, call!(alt((tag("*"), tag("%2A")))));
+named!(STAR<Input, Input>, call!(alt((tag("*"), tag("%2A")))));
 //* SQUOTE = "'" / "%27"
-named!(SQUOTE<&str, &str>, call!(alt((tag("'"), tag("%27")))));
+named!(SQUOTE<Input, Input>, call!(alt((tag("'"), tag("%27")))));
 //*
 //* OPEN  = "(" / "%28"
-named!(OPEN<&str, &str>, call!(alt((tag("("), tag("%28")))));
+named!(OPEN<Input, Input>, call!(alt((tag("("), tag("%28")))));
 //* CLOSE = ")" / "%29"
-named!(CLOSE<&str, &str>, call!(alt((tag(")"), tag("%29")))));
+named!(CLOSE<Input, Input>, call!(alt((tag(")"), tag("%29")))));
 //*
 //*
 //* ;------------------------------------------------------------------------------
@@ -2466,12 +2750,12 @@ named!(CLOSE<&str, &str>, call!(alt((tag(")"), tag("%29")))));
 //* ;------------------------------------------------------------------------------
 //*
 //* URI           = scheme ":" hier-part [ "?" query ] [ "#" fragment ]
-named!(URI<&str, &str>, call!(recognize(tuple((scheme, tag(":"), hier_part, opt(tuple((tag("?"), query))), opt(tuple((tag("#"), fragment))))))));
+named!(URI<Input, Input>, call!(recognize(tuple((scheme, tag(":"), hier_part, opt(tuple((tag("?"), query))), opt(tuple((tag("#"), fragment))))))));
 //* hier-part     = "//" authority path-abempty
 //*               / path-absolute
 //*               / path-rootless
 //* ;              / path-empty
-named!(hier_part<&str, &str>, call!(recognize(tuple((tag("//"), authority, alt((path_abempty, path_absolute, path_rootless, path_empty)))))));
+named!(hier_part<Input, Input>, call!(recognize(tuple((tag("//"), authority, alt((path_abempty, path_absolute, path_rootless, path_empty)))))));
 //* ;URI-reference = URI / relative-ref
 //* ;absolute-URI  = scheme ":" hier-part [ "?" query ]
 //* ;relative-ref  = relative-part [ "?" query ] [ "#" fragment ]
@@ -2480,19 +2764,19 @@ named!(hier_part<&str, &str>, call!(recognize(tuple((tag("//"), authority, alt((
 //* ;              / path-noscheme
 //* ;              / path-empty
 //* scheme        = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
-named!(scheme<&str, &str>, call!(recognize(tuple((ALPHA, many0(alt((ALPHA, DIGIT, tag("+"), tag("-"), tag(".")))))))));
+named!(scheme<Input, Input>, call!(recognize(tuple((ALPHA, many0(alt((ALPHA, DIGIT, tag("+"), tag("-"), tag(".")))))))));
 //* authority     = [ userinfo "@" ] host [ ":" port ]
-named!(authority<&str, &str>, call!(recognize(tuple((opt(tuple((userinfo, tag("@")))), host, opt(tuple((tag(":"), port))))))));
+named!(authority<Input, Input>, call!(recognize(tuple((opt(tuple((userinfo, tag("@")))), host, opt(tuple((tag(":"), port))))))));
 //* userinfo      = *( unreserved / pct-encoded / sub-delims / ":" )
-named!(userinfo<&str, &str>, call!(recognize(many0(alt((unreserved, pct_encoded, sub_delims, tag(":")))))));
+named!(userinfo<Input, Input>, call!(recognize(many0(alt((unreserved, pct_encoded, sub_delims, tag(":")))))));
 //* host          = IP-literal / IPv4address / reg-name
-named!(host<&str, &str>, call!(alt((IP_literal, IPv4address, reg_name))));
+named!(host<Input, Input>, call!(alt((IP_literal, IPv4address, reg_name))));
 //* port          = *DIGIT
-named!(port<&str, &str>, call!(recognize(many0(DIGIT))));
+named!(port<Input, Input>, call!(recognize(many0(DIGIT))));
 //* IP-literal    = "[" ( IPv6address / IPvFuture  ) "]"
-named!(IP_literal<&str, &str>, call!(delimited(tag("["), alt((IPv6address, IPvFuture)), tag("]"))));
+named!(IP_literal<Input, Input>, call!(delimited(tag("["), alt((IPv6address, IPvFuture)), tag("]"))));
 //* IPvFuture     = "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )
-named!(IPvFuture<&str, &str>, call!(recognize(tuple((tag("v"), many1(HEXDIG), tag("."), many1(alt((unreserved, sub_delims, tag(":")))))))));
+named!(IPvFuture<Input, Input>, call!(recognize(tuple((tag("v"), many1(HEXDIG), tag("."), many1(alt((unreserved, sub_delims, tag(":")))))))));
 //* IPv6address   =                            6( h16 ":" ) ls32
 //*                  /                       "::" 5( h16 ":" ) ls32
 //*                  / [               h16 ] "::" 4( h16 ":" ) ls32
@@ -2502,7 +2786,7 @@ named!(IPvFuture<&str, &str>, call!(recognize(tuple((tag("v"), many1(HEXDIG), ta
 //*                  / [ *4( h16 ":" ) h16 ] "::"              ls32
 //*                  / [ *5( h16 ":" ) h16 ] "::"              h16
 //*                  / [ *6( h16 ":" ) h16 ] "::"
-named!(IPv6address<&str, &str>, call!(alt((
+named!(IPv6address<Input, Input>, call!(alt((
 		recognize(tuple((                                                                        many_m_n(6, 6, tuple((h16, tag(":")))), ls32))) ,
 		recognize(tuple((                                                            tag("::"), many_m_n(5, 5, tuple((h16, tag(":")))), ls32))) ,
 		recognize(tuple((opt(                                                h16 ), tag("::"), many_m_n(4, 4, tuple((h16, tag(":")))), ls32))) ,
@@ -2514,17 +2798,17 @@ named!(IPv6address<&str, &str>, call!(alt((
 		recognize(tuple((opt(tuple((many_m_n(0, 6, tuple((h16, tag(":")))), h16))), tag("::")                                               )))
 ))));
 //* h16           = 1*4HEXDIG
-named!(h16<&str, &str>, call!(recognize(many1(many_m_n(4, 4, HEXDIG)))));
+named!(h16<Input, Input>, call!(recognize(many1(many_m_n(4, 4, HEXDIG)))));
 //* ls32          = ( h16 ":" h16 ) / IPv4address
-named!(ls32<&str, &str>, call!(alt((recognize(separated_pair(h16, tag(":"), h16)), IPv4address))));
+named!(ls32<Input, Input>, call!(alt((recognize(separated_pair(h16, tag(":"), h16)), IPv4address))));
 //* IPv4address   = dec-octet "." dec-octet "." dec-octet "." dec-octet
-named!(IPv4address<&str, &str>, call!(recognize(tuple((dec_octet, tag("."), dec_octet, tag("."), dec_octet, tag("."), dec_octet)))));
+named!(IPv4address<Input, Input>, call!(recognize(tuple((dec_octet, tag("."), dec_octet, tag("."), dec_octet, tag("."), dec_octet)))));
 //* dec-octet     = "1" 2DIGIT            ; 100-199
 //*               / "2" %x30-34 DIGIT     ; 200-249
 //*               / "25" %x30-35          ; 250-255
 //*               / %x31-39 DIGIT         ; 10-99
 //*               / DIGIT                 ; 0-9
-named!(dec_octet<&str, &str>, call!(alt((
+named!(dec_octet<Input, Input>, call!(alt((
 	recognize(tuple((tag("1"), DIGIT, DIGIT)))            ,
 	recognize(tuple((tag("2"), one_of("01234"), DIGIT))) ,
 	recognize(tuple((tag("25"), one_of("012345"))))      ,
@@ -2532,65 +2816,65 @@ named!(dec_octet<&str, &str>, call!(alt((
 	DIGIT
 ))));
 //* reg-name      = *( unreserved / pct-encoded / sub-delims )
-named!(reg_name<&str, &str>, call!(recognize(many0(alt((unreserved, pct_encoded, sub_delims))))));
+named!(reg_name<Input, Input>, call!(recognize(many0(alt((unreserved, pct_encoded, sub_delims))))));
 //* ;path          = path-abempty    ; begins with "/" or is empty
 //* ;              / path-absolute   ; begins with "/" but not "//"
 //* ;              / path-noscheme   ; begins with a non-colon segment
 //* ;              / path-rootless   ; begins with a segment
 //* ;              / path-empty      ; zero characters
 //* path-abempty  = *( "/" segment )
-named!(path_abempty<&str, &str>, call!(recognize(many0(preceded(tag("/"), segment)))));
+named!(path_abempty<Input, Input>, call!(recognize(many0(preceded(tag("/"), segment)))));
 //* path-absolute = "/" [ segment-nz *( "/" segment ) ]
-named!(path_absolute<&str, &str>, call!(recognize(tuple((tag("/"), opt(tuple((segment_nz, path_abempty))))))));
+named!(path_absolute<Input, Input>, call!(recognize(tuple((tag("/"), opt(tuple((segment_nz, path_abempty))))))));
 //* ;path-noscheme = segment-nz-nc *( "/" segment )
 //* path-rootless = segment-nz *( "/" segment )
-named!(path_rootless<&str, &str>, call!(recognize(tuple((segment_nz, path_abempty)))));
+named!(path_rootless<Input, Input>, call!(recognize(tuple((segment_nz, path_abempty)))));
 //* ;path-empty    = ""
-named!(path_empty<&str, &str>, call!(tag("")));
+named!(path_empty<Input, Input>, call!(tag("")));
 //* segment       = *pchar
-named!(segment<&str, &str>, call!(recognize(many0(pchar))));
+named!(segment<Input, Input>, call!(recognize(many0(pchar))));
 //* segment-nz    = 1*pchar
-named!(segment_nz<&str, &str>, call!(recognize(many1(pchar))));
+named!(segment_nz<Input, Input>, call!(recognize(many1(pchar))));
 //* ;segment-nz-nc = 1*( unreserved / pct-encoded / sub-delims / "@" ) ; non-zero-length segment without any colon ":"
 //* pchar         = unreserved / pct-encoded / sub-delims / ":" / "@"
-named!(pchar<&str, &str>, call!(alt((unreserved, pct_encoded, sub_delims, recognize(one_of(":@"))))));
+named!(pchar<Input, Input>, call!(alt((unreserved, pct_encoded, sub_delims, recognize(one_of(":@"))))));
 //* query         = *( pchar / "/" / "?" )
-named!(query<&str, &str>, call!(recognize(many0(alt((pchar, recognize(one_of("/?"))))))));
+named!(query<Input, Input>, call!(recognize(many0(alt((pchar, recognize(one_of("/?"))))))));
 //* fragment      = *( pchar / "/" / "?" )
-named!(fragment<&str, &str>, call!(recognize(many0(alt((pchar, recognize(one_of("/?"))))))));
+named!(fragment<Input, Input>, call!(recognize(many0(alt((pchar, recognize(one_of("/?"))))))));
 //* pct-encoded   = "%" HEXDIG HEXDIG
-named!(pct_encoded<&str, &str>, call!(recognize(tuple((tag("%"), HEXDIG, HEXDIG)))));
+named!(pct_encoded<Input, Input>, call!(recognize(tuple((tag("%"), HEXDIG, HEXDIG)))));
 //* unreserved    = ALPHA / DIGIT / "-" / "." / "_" / "~"
-named!(unreserved<&str, &str>, call!(alt((ALPHA, DIGIT, recognize(one_of("-._~"))))));
+named!(unreserved<Input, Input>, call!(alt((ALPHA, DIGIT, recognize(one_of("-._~"))))));
 //* ;reserved      = gen-delims / sub-delims
 //* ;gen-delims    = ":" / "/" / "?" / "#" / "[" / "]" / "@"
 //* ;sub-delims    = "!" / "$" / "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="
 //* sub-delims     =       "$" / "&" / "'" /                                     "=" / other-delims
-named!(sub_delims<&str, &str>, call!(alt((recognize(one_of("$&'=")), other_delims))));
+named!(sub_delims<Input, Input>, call!(alt((recognize(one_of("$&'=")), other_delims))));
 //* other-delims   = "!" /                   "(" / ")" / "*" / "+" / "," / ";"
-named!(other_delims<&str, &str>, call!(recognize(one_of("!()*+,;"))));
+named!(other_delims<Input, Input>, call!(recognize(one_of("!()*+,;"))));
 //*
 //* pchar-no-SQUOTE       = unreserved / pct-encoded-no-SQUOTE / other-delims / "$" / "&" / "=" / ":" / "@"
-named!(pchar_no_SQUOTE<&str, &str>, call!(alt((unreserved, pct_encoded_no_SQUOTE, other_delims, recognize(one_of("$&=:@"))))));
+named!(pchar_no_SQUOTE<Input, Input>, call!(alt((unreserved, pct_encoded_no_SQUOTE, other_delims, recognize(one_of("$&=:@"))))));
 //* pct-encoded-no-SQUOTE = "%" ( "0" / "1" /   "3" / "4" / "5" / "6" / "8" / "9" / A-to-F ) HEXDIG
 //*                       / "%" "2" ( "0" / "1" / "2" / "3" / "4" / "5" / "6" /   "8" / "9" / A-to-F )
-named!(pct_encoded_no_SQUOTE<&str, &str>, call!(alt((  recognize(tuple((tag("%"), one_of("013456789ABCDEFabcdef"), HEXDIG)))
+named!(pct_encoded_no_SQUOTE<Input, Input>, call!(alt((  recognize(tuple((tag("%"), one_of("013456789ABCDEFabcdef"), HEXDIG)))
 					       , recognize(tuple((tag("%2"), one_of("012345689ABCDEFabcdef"))))
 					      ))));
 //*
 //* qchar-no-AMP              = unreserved / pct-encoded / other-delims / ":" / "@" / "/" / "?" / "$" / "'" / "="
-named!(qchar_no_AMP<&str, &str>, call!(alt((qchar_no_AMP_EQ_AT_DOLLAR, tag("=")))));
+named!(qchar_no_AMP<Input, Input>, call!(alt((qchar_no_AMP_EQ_AT_DOLLAR, tag("=")))));
 //* qchar-no-AMP-EQ           = unreserved / pct-encoded / other-delims / ":" / "@" / "/" / "?" / "$" / "'"
-named!(qchar_no_AMP_EQ<&str, &str>, call!(alt((qchar_no_AMP_EQ_AT_DOLLAR, tag("@"), tag("$")))));
+named!(qchar_no_AMP_EQ<Input, Input>, call!(alt((qchar_no_AMP_EQ_AT_DOLLAR, tag("@"), tag("$")))));
 //* qchar-no-AMP-EQ-AT-DOLLAR = unreserved / pct-encoded / other-delims / ":" /       "/" / "?" /       "'"
-named!(qchar_no_AMP_EQ_AT_DOLLAR<&str, &str>, call!(alt((unreserved, pct_encoded, other_delims, recognize(one_of(":/?'"))))));
+named!(qchar_no_AMP_EQ_AT_DOLLAR<Input, Input>, call!(alt((unreserved, pct_encoded, other_delims, recognize(one_of(":/?'"))))));
 //*
 //* qchar-unescaped       = unreserved / pct-encoded-unescaped / other-delims / ":" / "@" / "/" / "?" / "$" / "'" / "="
-named!(qchar_unescaped<&str, &str>, call!(alt((unreserved, pct_encoded_unscaped, other_delims, recognize(one_of(":@/?$'="))))));
+named!(qchar_unescaped<Input, Input>, call!(alt((unreserved, pct_encoded_unscaped, other_delims, recognize(one_of(":@/?$'="))))));
 //* pct-encoded-unescaped = "%" ( "0" / "1" /   "3" / "4" /   "6" / "7" / "8" / "9" / A-to-F ) HEXDIG
 //*                       / "%" "2" ( "0" / "1" /   "3" / "4" / "5" / "6" / "7" / "8" / "9" / A-to-F )
 //*                       / "%" "5" ( DIGIT / "A" / "B" /   "D" / "E" / "F" )
-named!(pct_encoded_unscaped<&str, &str>, call!(alt(( recognize(tuple((tag("%"), alt((recognize(one_of("01346789")), A_to_F)), HEXDIG)))
+named!(pct_encoded_unscaped<Input, Input>, call!(alt(( recognize(tuple((tag("%"), alt((recognize(one_of("01346789")), A_to_F)), HEXDIG)))
 					     , recognize(tuple((tag("%2"), alt((recognize(one_of("013456789")), A_to_F)))))
 					     , recognize(tuple((tag("%5"), alt((DIGIT, recognize(one_of("ABDEFabdef")))))))
 					     ))));
@@ -2598,7 +2882,7 @@ named!(pct_encoded_unscaped<&str, &str>, call!(alt(( recognize(tuple((tag("%"), 
 //*
 //* qchar-no-AMP-DQUOTE   = qchar-unescaped
 //*                       / escape ( escape / quotation-mark )
-named!(qchar_no_AMP_DQUOTE<&str, &str>, call!(alt((qchar_unescaped, recognize(tuple((escape, alt((escape, quotation_mark)))))))));
+named!(qchar_no_AMP_DQUOTE<Input, Input>, call!(alt((qchar_unescaped, recognize(tuple((escape, alt((escape, quotation_mark)))))))));
 //*
 //*
 //* ;------------------------------------------------------------------------------
@@ -2608,42 +2892,42 @@ named!(qchar_no_AMP_DQUOTE<&str, &str>, call!(alt((qchar_unescaped, recognize(tu
 //* ;------------------------------------------------------------------------------
 //*
 //* IRI-in-header = 1*( VCHAR / obs-text )
-named!(IRI_in_header<&str, &str>, call!(recognize(many1(alt((VCHAR, obs_text))))));
+named!(IRI_in_header<Input, Input>, call!(recognize(many1(alt((VCHAR, obs_text))))));
 //* IRI-in-query  = 1*qchar-no-AMP
-named!(IRI_in_query<&str, &str>, call!(recognize(many1(qchar_no_AMP))));
+named!(IRI_in_query<Input, Input>, call!(recognize(many1(qchar_no_AMP))));
 
 //* ;------------------------------------------------------------------------------
 //* ; C. ABNF core definitions [RFC5234]
 //* ;------------------------------------------------------------------------------
 //*
 //* ALPHA  = %x41-5A / %x61-7A
-named!(ALPHA<&str, &str>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii() && is_alphabetic(*chr as u8)))));
+named!(ALPHA<Input, Input>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii() && is_alphabetic(*chr as u8)))));
 
 //* DIGIT  = %x30-39
-named!(DIGIT<&str, &str>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii() && is_digit(*chr as u8)))));
+named!(DIGIT<Input, Input>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii() && is_digit(*chr as u8)))));
 //
 // //* HEXDIG = DIGIT / A-to-F
-named!(HEXDIG<&str, &str>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii() && is_hex_digit(*chr as u8)))));
+named!(HEXDIG<Input, Input>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii() && is_hex_digit(*chr as u8)))));
 
 //* A-to-F = "A" / "B" / "C" / "D" / "E" / "F"
 fn is_A_to_F(chr: u8) -> bool {
 	(chr >= 0x41 && chr <= 0x46) || (chr >= 0x61 && chr <= 0x66)
 }
-named!(A_to_F<&str, &str>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii() && is_A_to_F(*chr as u8)))));
+named!(A_to_F<Input, Input>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii() && is_A_to_F(*chr as u8)))));
 
 //* DQUOTE = %x22
-named!(DQUOTE<&str, &str>, call!(tag("\u{0022}")));
+named!(DQUOTE<Input, Input>, call!(tag("\u{0022}")));
 
 //* SP     = %x20
-named!(SP<&str, &str>, call!(tag("\u{0020}")));
+named!(SP<Input, Input>, call!(tag("\u{0020}")));
 
 //* HTAB   = %x09
-named!(HTAB<&str, &str>, call!(tag("\u{0009}")));
+named!(HTAB<Input, Input>, call!(tag("\u{0009}")));
 
 //* ;WSP    = SP / HTAB
 //* ;LWSP = *(WSP / CRLF WSP)
 //* VCHAR = %x21-7E
-named!(VCHAR<&str, &str>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii_graphic()))));
+named!(VCHAR<Input, Input>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii_graphic()))));
 
 //* ;CHAR = %x01-7F
 //* ;LOCTET = %x00-FF

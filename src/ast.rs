@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use std::str::FromStr;
+use std::rc::Rc;
 
 use super::schema;
 use uuid::Uuid;
@@ -27,9 +28,70 @@ pub enum RelativeURI<'a> {
 
 #[derive(Debug,Clone)]
 pub struct ResourcePath<'a> {
-	pub segments: Vec<PathSegment<'a>>,
+	pub resource: Rc<Expr<'a>>,
 	pub options: Option<Vec<QueryOption<'a>>>,
 }
+
+// pub struct Output<'a>(OutputCardinality, OutputKind<'a>);
+//
+// mod output {
+// 	pub struct EntityCollection {
+// 		select: Option<Select>,
+// 		filter: Option<Filter>,
+// 		expand: Option<Expand>,
+// 	}
+// }
+//
+// pub enum OutputCardinality {
+// 	Collection,
+// 	Single
+// }
+//
+// pub enum OutputKind<'a> {
+// 	Entity(&'a schema::kind::Entity),
+// 	Complex(&'a schema::kind::Complex),
+// 	Primitive(&'a schema::kind::Primitive),
+// 	Collection(&'a OutputKind)
+// }
+//
+// impl OutputKind {
+// 	fn options(&self) -> impl Parser {
+// 		match self {
+// 			Self::Entity(_) => alt(
+//
+// 		}
+// 	}
+// }
+
+// pub enum CollectionNavigationOption {
+// 	BoundOperation,                               // -> ()
+// 	Count,                                        // -> ()
+// 	Each,                                         // -> boundOperation
+// 	Filter(ParameterAlias<'a>),                   // -> collectionNavigation
+// 	KeyPredicate(KeyPredicate<'a>),               // -> singleNavigation
+// }
+//
+// struct EntitySet {
+// 	col_nav: {
+// 		filter: Option<Alias>,
+// 		enum {
+// 			Key,
+// 			Each,
+// 			Count,
+// 			Ref,
+// 		}
+// 	}
+// }
+//
+// struct Singleton {
+//
+// }
+//
+// pub enum SingleNavigationOption {
+// 	Property(&'a schema::property::Property),     // -> single,collection,complexCollection,complex,primitiveCollection,primitive,boundOperation
+// 	Ref,                                          // -> ()
+// 	Value,
+// }
 
 #[derive(Debug,Clone)]
 pub enum PathSegment<'a> {
@@ -92,7 +154,7 @@ pub enum QueryOption<'a> {
 	Compute,
 	DeltaToken,
 	Expand,
-	Filter(Expr),
+	Filter(Rc<Expr<'a>>),
 	Id,
 	InlineCount,
 	OrderBy,
@@ -109,7 +171,7 @@ pub enum QueryOption<'a> {
 	Custom(&'a str),
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,Copy)]
 pub enum UnOp {
 	/// The `not` operator for logical inversion
 	Not,
@@ -126,7 +188,7 @@ impl UnOp {
 	}
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,Copy)]
 pub enum BinOp {
 	/// The `add` operator (addition)
 	Add,
@@ -185,7 +247,7 @@ impl BinOp {
 	}
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,Copy)]
 pub enum IntTy {
 	U8,
 	I8,
@@ -194,7 +256,7 @@ pub enum IntTy {
 	I64,
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,Copy)]
 pub enum FloatTy {
 	F32,
 	F64,
@@ -233,21 +295,141 @@ pub enum Lit {
 }
 
 #[derive(Debug,Clone)]
-pub enum Expr {
-	Call(Box<Expr>, Vec<Expr>),
-	Lit(Lit),
-	Binary(BinOp, Box<Expr>, Box<Expr>),
-	Unary(UnOp, Box<Expr>),
-	List(Vec<Expr>),
-	// Cast,
-	// IsOf,
-	MethodCall(Method, Vec<Expr>),
-	// Root,
-	// JSON,
-	// Member,
+pub struct Filter<'a> {
+	expr: Expr<'a>,
+}
+
+pub type NodeId = u32;
+
+#[derive(Debug,Clone)]
+pub struct Expr<'a> {
+	pub id: NodeId,
+	// The AST node of the expression
+	pub node: ExprKind<'a>,
 }
 
 #[derive(Debug,Clone)]
+pub enum ExprKind<'a> {
+	Call(Rc<Expr<'a>>, Vec<Rc<Expr<'a>>>),
+	Lit(Lit),
+	Binary(BinOp, Rc<Expr<'a>>, Rc<Expr<'a>>),
+	Unary(UnOp, Rc<Expr<'a>>),
+	List(Vec<Rc<Expr<'a>>>),
+	Cast(&'a str, Rc<Expr<'a>>),
+	// IsOf,
+	MethodCall(Method, Vec<Rc<Expr<'a>>>),
+	// EntitySet(&'a schema::EntitySet, Rc<Options>),
+	Filter(Rc<Expr<'a>>, Rc<Expr<'a>>),
+	Member(Vec<PathSegment<'a>>),
+	Root,
+	// JSON,
+	// Member,
+	EntitySet(&'a schema::EntitySet),
+	Var(NodeId),
+	Placeholder,
+	Unimplemented,
+	// stuff from path segment
+	Singleton,
+	Action,
+	Function,
+	Crossjoin,
+	All,
+	Count(Rc<Expr<'a>>),
+	Each(Rc<Expr<'a>>),
+	Key(Rc<Expr<'a>>, Rc<Expr<'a>>),
+	Property(&'a schema::property::Property),
+	Ref(Rc<Expr<'a>>),
+	Value,
+	OrdinalIndex(i64),
+}
+
+
+impl Expr<'_> {
+	fn to_ty(&self) -> Ty {
+		match &self.node {
+			ExprKind::Call(f, b) => unimplemented!(),
+			// ExprKind::List(v) => Ty::Collection(v[0].to_ty()),
+			// ExprKind::Lit(l) => l.ty(),
+			_ => unimplemented!(),
+		}
+	}
+}
+
+#[derive(Debug,Clone)]
+pub struct Options<'a> {
+	pub filter: Option<Expr<'a>>,
+	pub select: Option<Expr<'a>>,
+	pub compute: Option<Expr<'a>>,
+}
+
+//#[derive(Debug,Clone)]
+//pub enum Ty<'a> {
+//	None,
+//	Primitive(schema::kind::Primitive),
+//	Enumeration(&'a schema::kind::Enumeration),
+//	Complex(&'a schema::kind::Complex),
+//	Entity(&'a schema::kind::Entity),
+//	Function,
+//	Collection(Rc<Ty<'a>>),
+//}
+
+pub use ty::Ty;
+
+pub mod ty {
+	use super::schema;
+
+	#[derive(Debug,Copy,Clone)]
+	pub enum Ty<'a> {
+		None,
+		Primitive(Primitive),
+		Enumeration(Enumeration<'a>),
+		Complex(Complex<'a>),
+		Entity(Entity<'a>),
+		Function,
+		Collection(Collection<'a>),
+	}
+
+	pub type Primitive = schema::kind::Primitive;
+	pub type Enumeration<'a> = &'a schema::kind::Enumeration;
+	pub type Complex<'a> = &'a schema::kind::Complex;
+	pub type Entity<'a> = &'a schema::kind::Entity;
+
+	#[derive(Debug,Copy,Clone)]
+	pub enum Collection<'a> {
+		Primitive(Primitive),
+		Enumeration(Enumeration<'a>),
+		Complex(Complex<'a>),
+		Entity(Entity<'a>),
+	}
+
+	impl<'a> From<Collection<'a>> for Ty<'a> {
+		fn from(ty: Collection<'a>) -> Ty<'a> {
+			Ty::Collection(ty)
+		}
+	}
+	impl<'a> From<Entity<'a>> for Ty<'a> {
+		fn from(ty: Entity<'a>) -> Ty<'a> {
+			Ty::Entity(ty)
+		}
+	}
+	impl<'a> From<Complex<'a>> for Ty<'a> {
+		fn from(ty: Complex<'a>) -> Ty<'a> {
+			Ty::Complex(ty)
+		}
+	}
+	impl<'a> From<Enumeration<'a>> for Ty<'a> {
+		fn from(ty: Enumeration<'a>) -> Ty<'a> {
+			Ty::Enumeration(ty)
+		}
+	}
+	impl From<Primitive> for Ty<'_> {
+		fn from(ty: Primitive) -> Ty<'static> {
+			Ty::Primitive(ty)
+		}
+	}
+}
+
+#[derive(Debug,Clone,Copy)]
 pub enum Method {
 	Substring,
 	Concat,
