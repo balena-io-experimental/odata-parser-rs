@@ -1,5 +1,7 @@
 //FIXME
 #![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 
 use std::str::FromStr;
 use std::rc::Rc;
@@ -306,6 +308,7 @@ pub struct Expr<'a> {
 	pub id: NodeId,
 	// The AST node of the expression
 	pub node: ExprKind<'a>,
+	pub ty: Ty<'a>,
 }
 
 #[derive(Debug,Clone)]
@@ -320,12 +323,12 @@ pub enum ExprKind<'a> {
 	MethodCall(Method, Vec<Rc<Expr<'a>>>),
 	// EntitySet(&'a schema::EntitySet, Rc<Options>),
 	Filter(Rc<Expr<'a>>, Rc<Expr<'a>>),
-	Member(Vec<PathSegment<'a>>),
+	// Member(Vec<PathSegment<'a>>),
 	Root,
 	// JSON,
 	// Member,
 	EntitySet(&'a schema::EntitySet),
-	Var(NodeId),
+	Var(Rc<Expr<'a>>),
 	Placeholder,
 	Unimplemented,
 	// stuff from path segment
@@ -340,17 +343,38 @@ pub enum ExprKind<'a> {
 	Property(&'a schema::property::Property),
 	Ref(Rc<Expr<'a>>),
 	Value,
-	OrdinalIndex(i64),
+	OrdinalIndex(Rc<Expr<'a>>, i64),
 }
 
 
-impl Expr<'_> {
-	fn to_ty(&self) -> Ty {
-		match &self.node {
-			ExprKind::Call(f, b) => unimplemented!(),
-			// ExprKind::List(v) => Ty::Collection(v[0].to_ty()),
-			// ExprKind::Lit(l) => l.ty(),
-			_ => unimplemented!(),
+impl<'a, 'b> ExprKind<'a> {
+	pub fn to_ty(&'b self) -> Ty<'a> {
+		match &self {
+			ExprKind::Call(a, b) => unimplemented!(),
+			ExprKind::Lit(l) => unimplemented!(),
+			ExprKind::Binary(op, lhs, rhs) => unimplemented!(),
+			ExprKind::Unary(op, arg) => unimplemented!(),
+			ExprKind::List(xs) => unimplemented!(),
+			ExprKind::Cast(ty, expr) => unimplemented!(),
+			ExprKind::MethodCall(method, args) => unimplemented!(),
+			ExprKind::Filter(collection, predicate) => collection.ty,
+			ExprKind::Root => unimplemented!(),
+			ExprKind::EntitySet(entity_set) => ty::Collection::Entity(&entity_set.kind).into(),
+			ExprKind::Var(expr) => expr.node.to_ty(),
+			ExprKind::Placeholder => unimplemented!(),
+			ExprKind::Unimplemented => ty::Ty::None,
+			ExprKind::Singleton => unimplemented!(),
+			ExprKind::Action => unimplemented!(),
+			ExprKind::Function => unimplemented!(),
+			ExprKind::Crossjoin => unimplemented!(),
+			ExprKind::All => unimplemented!(),
+			ExprKind::Count(_) => unimplemented!(),
+			ExprKind::Each(collection) => unimplemented!(),
+			ExprKind::Key(collection, keys) => unimplemented!(),
+			ExprKind::Property(_) => unimplemented!(),
+			ExprKind::Ref(_) => unimplemented!(),
+			ExprKind::Value => unimplemented!(),
+			ExprKind::OrdinalIndex(collection, _) => unimplemented!(),
 		}
 	}
 }

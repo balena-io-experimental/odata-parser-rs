@@ -111,7 +111,7 @@ fn main() {
 	let mut p = parser::Parser::new(&doc);
 	// println!("{:?}", parser::odataRelativeUri("ProductsByComplex(complex=@c)?@c={\"@odata.type\":\"Model.Customer\",\"Name\":\"Value\"}\n"));
 	// println!("{:#?}", p.parse("https://example.com/foobar/users/$filter=@foo/$filter=@bar/$count?$filter=true eq true"));
-	let (_, tree) = p.parse("https://example.com/foobar/applications/namespace.foo/$filter=@a/$filter=@b/foo.bar(null)").unwrap();
+	let (_, tree) = p.parse("https://example.com/foobar/applications/$filter=@a/$filter=@b").unwrap();
 
 	println!("{:#?}", tree);
 	// println!("{:#?}", compiler::compile_sql(&tree, &doc));
