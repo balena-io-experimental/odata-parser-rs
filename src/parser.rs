@@ -4,171 +4,170 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 
-use std::str::FromStr;
 use std::collections::HashMap;
-use std::iter::FromIterator;
 use std::convert::From;
+use std::iter::FromIterator;
 use std::rc::Rc;
+use std::str::FromStr;
 
-use std::str;
 use super::ast;
-use super::ast::{ExprKind,Expr};
+use super::ast::{Expr, ExprKind};
 use super::schema;
+use std::str;
 
 use uuid::Uuid;
 
-use nom::{IResult,Err,Needed};
 use nom::error::ErrorKind;
+use nom::{Err, IResult, Needed};
 
+use nom::branch::*;
 use nom::bytes::complete::*;
-use nom::character::*;
 use nom::character::complete::*;
+use nom::character::*;
 use nom::combinator::*;
 use nom::multi::*;
 use nom::number::complete::*;
 use nom::sequence::*;
-use nom::branch::*;
 
 use std::cell::Cell;
 
 /// Expression result
 fn expr<'a, F>(f: F) -> impl Fn(Input<'a>) -> ExprOutput<'a>
-where F: Fn(Input<'a>) -> IResult<Input<'a>, ExprKind<'a>>
+where
+    F: Fn(Input<'a>) -> IResult<Input<'a>, ExprKind<'a>>,
 {
-	move |input| {
-		match f(input.clone()) {
-			Ok((input, kind)) => {
-				let expr = Rc::new(input.parser.expr(kind));
-				Ok((input, expr))
-			},
-			Err(e) => Err(e),
-		}
-	}
+    move |input| match f(input.clone()) {
+        Ok((input, kind)) => {
+            let expr = Rc::new(input.parser.expr(kind));
+            Ok((input, expr))
+        }
+        Err(e) => Err(e),
+    }
 }
 
-use nom::{InputIter,InputLength,InputTake,InputTakeAtPosition,Compare,Slice,Offset};
+use nom::{Compare, InputIter, InputLength, InputTake, InputTakeAtPosition, Offset, Slice};
 use std::ops::RangeTo;
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 // If we don't derive Copy the compiler will scream at you if you try to reuse the same "slice"
 // twice.
 pub struct Input<'a> {
-	parser: &'a Parser<'a>,
-	data: &'a str,
-	ty: ast::Ty<'a>,
+    parser: &'a Parser<'a>,
+    data: &'a str,
+    ty: ast::Ty<'a>,
 }
 
 impl nom::UnspecializedInput for Input<'_> {}
 
 impl Input<'_> {
-	fn to_string(&self) -> String {
-		String::from(self.data)
-	}
+    fn to_string(&self) -> String {
+        String::from(self.data)
+    }
 
-	fn len(&self) -> usize {
-		self.data.len()
-	}
+    fn len(&self) -> usize {
+        self.data.len()
+    }
 
-	fn split_at(&self, mid: usize) -> (Self, Self) {
-		let (a, b) = self.data.split_at(mid);
-		let a = Self{
-			parser: self.parser,
-			data: a,
-			ty: self.ty,
-		};
-		let b = Self{
-			parser: self.parser,
-			data: b,
-			ty: self.ty,
-		};
-		(a, b)
-	}
+    fn split_at(&self, mid: usize) -> (Self, Self) {
+        let (a, b) = self.data.split_at(mid);
+        let a = Self {
+            parser: self.parser,
+            data: a,
+            ty: self.ty,
+        };
+        let b = Self {
+            parser: self.parser,
+            data: b,
+            ty: self.ty,
+        };
+        (a, b)
+    }
 }
 impl InputTake for Input<'_> {
-	fn take(&self, count: usize) -> Self {
-		Self {
-			parser: self.parser,
-			data: InputTake::take(&self.data, count),
-			ty: self.ty,
-		}
-	}
-	fn take_split(&self, count: usize) -> (Self, Self) {
-		let (a, b) = InputTake::take_split(&self.data, count);
-		(
-			Self {
-				parser: self.parser,
-				data: a,
-				ty: self.ty,
-			},
-			Self {
-				parser: self.parser,
-				data: b,
-				ty: self.ty,
-			}
-		)
-	}
+    fn take(&self, count: usize) -> Self {
+        Self {
+            parser: self.parser,
+            data: InputTake::take(&self.data, count),
+            ty: self.ty,
+        }
+    }
+    fn take_split(&self, count: usize) -> (Self, Self) {
+        let (a, b) = InputTake::take_split(&self.data, count);
+        (
+            Self {
+                parser: self.parser,
+                data: a,
+                ty: self.ty,
+            },
+            Self {
+                parser: self.parser,
+                data: b,
+                ty: self.ty,
+            },
+        )
+    }
 }
 
 impl<'a> InputIter for Input<'a> {
     type Item = <&'a str as InputIter>::Item;
     type Iter = <&'a str as InputIter>::Iter;
-    type IterElem =  <&'a str as InputIter>::IterElem;
+    type IterElem = <&'a str as InputIter>::IterElem;
     fn iter_indices(&self) -> Self::Iter {
-		InputIter::iter_indices(&self.data)
-	}
+        InputIter::iter_indices(&self.data)
+    }
     fn iter_elements(&self) -> Self::IterElem {
-		InputIter::iter_elements(&self.data)
-	}
+        InputIter::iter_elements(&self.data)
+    }
     fn position<P>(&self, predicate: P) -> Option<usize>
     where
         P: Fn(Self::Item) -> bool,
-	{
-		InputIter::position(&self.data, predicate)
-	}
+    {
+        InputIter::position(&self.data, predicate)
+    }
     fn slice_index(&self, count: usize) -> Option<usize> {
-		InputIter::slice_index(&self.data, count)
-	}
+        InputIter::slice_index(&self.data, count)
+    }
 }
 
 impl Compare<&str> for Input<'_> {
-	fn compare(&self, t: &str) -> nom::CompareResult {
-		Compare::compare(&self.data, t)
-	}
-	fn compare_no_case(&self, t: &str) -> nom::CompareResult {
-		Compare::compare_no_case(&self.data, t)
-	}
+    fn compare(&self, t: &str) -> nom::CompareResult {
+        Compare::compare(&self.data, t)
+    }
+    fn compare_no_case(&self, t: &str) -> nom::CompareResult {
+        Compare::compare_no_case(&self.data, t)
+    }
 }
 
 impl Slice<std::ops::RangeTo<usize>> for Input<'_> {
-	fn slice(&self, range: std::ops::RangeTo<usize>) -> Self {
-		Self{
-			parser: self.parser,
-			data: Slice::slice(&self.data, range),
-			ty: self.ty,
-		}
-	}
+    fn slice(&self, range: std::ops::RangeTo<usize>) -> Self {
+        Self {
+            parser: self.parser,
+            data: Slice::slice(&self.data, range),
+            ty: self.ty,
+        }
+    }
 }
 
 impl Slice<std::ops::RangeFrom<usize>> for Input<'_> {
-	fn slice(&self, range: std::ops::RangeFrom<usize>) -> Self {
-		Self{
-			parser: self.parser,
-			data: Slice::slice(&self.data, range),
-			ty: self.ty,
-		}
-	}
+    fn slice(&self, range: std::ops::RangeFrom<usize>) -> Self {
+        Self {
+            parser: self.parser,
+            data: Slice::slice(&self.data, range),
+            ty: self.ty,
+        }
+    }
 }
 
 impl Offset for Input<'_> {
-	fn offset(&self, second: &Self) -> usize {
-		Offset::offset(&self.data, &second.data)
-	}
+    fn offset(&self, second: &Self) -> usize {
+        Offset::offset(&self.data, &second.data)
+    }
 }
 
 impl InputLength for Input<'_> {
-	fn input_len(&self) -> usize {
-		InputLength::input_len(&self.data)
-	}
+    fn input_len(&self) -> usize {
+        InputLength::input_len(&self.data)
+    }
 }
 
 impl std::cmp::PartialEq for Input<'_> {
@@ -278,114 +277,121 @@ use std::cell::RefCell;
 
 #[derive(Debug)]
 struct Scope<'a> {
-	/// Essentially a list of stack frames
-	vars: RefCell<Vec<Vec<(String, (ast::NodeId, ast::Ty<'a>))>>>
+    /// Essentially a list of stack frames
+    vars: RefCell<Vec<Vec<(String, (ast::NodeId, ast::Ty<'a>))>>>,
 }
 
 impl<'a> Scope<'a> {
-	fn new() -> Self {
-		Scope{
-			vars: RefCell::new(vec![]),
-		}
-	}
+    fn new() -> Self {
+        Scope {
+            vars: RefCell::new(vec![]),
+        }
+    }
 
-	fn resolve(&self, name: &'a str) -> Option<(ast::NodeId, ast::Ty<'a>)> {
-		self.vars.borrow()
-			.iter()
-			.rev()
-			.find_map(|frame| {
-				frame
-					.iter()
-					.rev()
-					.find(|v| v.0 == name).map(|v| v.1.clone())
-			})
-	}
+    fn resolve(&self, name: &'a str) -> Option<(ast::NodeId, ast::Ty<'a>)> {
+        self.vars.borrow().iter().rev().find_map(|frame| {
+            frame
+                .iter()
+                .rev()
+                .find(|v| v.0 == name)
+                .map(|v| v.1.clone())
+        })
+    }
 
-	fn push(&self, name: &str, id: ast::NodeId, ty: ast::Ty) {
-		unimplemented!()
-	}
+    fn push(&self, name: &str, id: ast::NodeId, ty: ast::Ty) {
+        unimplemented!()
+    }
 
-	fn push_frame(&self) {
-		unimplemented!()
-	}
+    fn push_frame(&self) {
+        unimplemented!()
+    }
 
-	fn pop_frame(&self) {
-		unimplemented!()
-	}
+    fn pop_frame(&self) {
+        unimplemented!()
+    }
 }
 
 #[derive(Debug)]
 pub struct Parser<'a> {
-	document: &'a schema::Document<'a>,
-	next_node_id: Cell<ast::NodeId>,
-	scope: Scope<'a>,
-	// bound_vars: RefCell<HashMap<Identifier, (Type, Option<Value>>>,
+    document: &'a schema::Document<'a>,
+    next_node_id: Cell<ast::NodeId>,
+    scope: Scope<'a>,
+    // bound_vars: RefCell<HashMap<Identifier, (Type, Option<Value>>>,
 }
 
 impl<'a, 'b> Parser<'a> {
-	pub fn new(document: &'a schema::Document<'a>) -> Self {
-		Parser{
-			document: document,
-			next_node_id: Cell::new(1),
-			scope: Scope::new(),
-		}
-	}
+    pub fn new(document: &'a schema::Document<'a>) -> Self {
+        Parser {
+            document: document,
+            next_node_id: Cell::new(1),
+            scope: Scope::new(),
+        }
+    }
 
-	pub fn expr(&self, node: ExprKind<'b>) -> ast::Expr<'b> {
-		let expr = ast::Expr{
-			id: self.next_node_id.get(),
-			// FIXME is there a way to avoid the clone? I think the lifetimes could be relaxed a
-			// bit to allow it
-			ty: node.clone().to_ty(),
-			node,
-			// FIXME
-		};
+    pub fn expr(&self, node: ExprKind<'b>) -> ast::Expr<'b> {
+        let expr = ast::Expr {
+            id: self.next_node_id.get(),
+            // FIXME is there a way to avoid the clone? I think the lifetimes could be relaxed a
+            // bit to allow it
+            ty: node.clone().to_ty(),
+            node,
+            // FIXME
+        };
 
-		self.next_node_id.set(expr.id + 1);
-		expr
-	}
+        self.next_node_id.set(expr.id + 1);
+        expr
+    }
 
-	pub fn parse(&'a mut self, input: &'a str) -> IResult<Input<'a>, ast::ODataURI<'a>> {
-		let input = Input{
-			parser: self,
-			data: input,
-			ty: ast::Ty::None,
-		};
+    pub fn parse(&'a mut self, input: &'a str) -> IResult<Input<'a>, ast::ODataURI<'a>> {
+        let input = Input {
+            parser: self,
+            data: input,
+            ty: ast::Ty::None,
+        };
 
-		odataUri(input, self.document)
-	}
+        odataUri(input, self.document)
+    }
 }
 
-pub fn odataUri<'a>(input: Input<'a>, document: &'a schema::Document<'a>) -> IResult<Input<'a>, ast::ODataURI<'a>> {
-	// src: http://docs.oasis-open.org/odata/odata/v4.01/cs01/part2-url-conventions/odata-v4.01-cs01-part2-url-conventions.html#sec_URLComponents
-	// Mandated and suggested content of these three significant URL components used by an OData
-	// service are covered in sequence in the three following chapters.  OData follows the URI
-	// syntax rules defined in [RFC3986] and in addition assigns special meaning to several of the
-	// sub-delimiters defined by [RFC3986], so special care has to be taken regarding parsing and
-	// percent-decoding.
-	//
-	// [RFC3986] defines three steps for URL processing that MUST be performed before percent-decoding:
-	// ·       Split undecoded URL into components scheme, hier-part, query, and fragment at first ":", then first "?", and then first "#"
-	// ·       Split undecoded hier-part into authority and path
-	// ·       Split undecoded path into path segments at "/"
-	//
-	// After applying these steps defined by RFC3986 the following steps MUST be performed:
-	// ·       Split undecoded query at "&" into query options, and each query option at the first "=" into query option name and query option value
-	// ·       Percent-decode path segments, query option names, and query option values exactly once
-	// ·       Interpret path segments, query option names, and query option values according to OData rules
+pub fn odataUri<'a>(
+    input: Input<'a>,
+    document: &'a schema::Document<'a>,
+) -> IResult<Input<'a>, ast::ODataURI<'a>> {
+    // src: http://docs.oasis-open.org/odata/odata/v4.01/cs01/part2-url-conventions/odata-v4.01-cs01-part2-url-conventions.html#sec_URLComponents
+    // Mandated and suggested content of these three significant URL components used by an OData
+    // service are covered in sequence in the three following chapters.  OData follows the URI
+    // syntax rules defined in [RFC3986] and in addition assigns special meaning to several of the
+    // sub-delimiters defined by [RFC3986], so special care has to be taken regarding parsing and
+    // percent-decoding.
+    //
+    // [RFC3986] defines three steps for URL processing that MUST be performed before percent-decoding:
+    // ·       Split undecoded URL into components scheme, hier-part, query, and fragment at first ":", then first "?", and then first "#"
+    // ·       Split undecoded hier-part into authority and path
+    // ·       Split undecoded path into path segments at "/"
+    //
+    // After applying these steps defined by RFC3986 the following steps MUST be performed:
+    // ·       Split undecoded query at "&" into query options, and each query option at the first "=" into query option name and query option value
+    // ·       Percent-decode path segments, query option names, and query option values exactly once
+    // ·       Interpret path segments, query option names, and query option values according to OData rules
 
-	let (input, service_root) = serviceRoot(input, &document.service_root)?;
-	let (input, relative_uri) = opt(|i| odataRelativeUri(i, &document))(input)?;
+    let (input, service_root) = serviceRoot(input, &document.service_root)?;
+    let (input, relative_uri) = opt(|i| odataRelativeUri(i, &document))(input)?;
 
-	Ok((input, ast::ODataURI{service_root: service_root.data, relative_uri}))
+    Ok((
+        input,
+        ast::ODataURI {
+            service_root: service_root.data,
+            relative_uri,
+        },
+    ))
 }
 //*
 //* serviceRoot = ( "https" / "http" )                    ; Note: case-insensitive
 //*               "://" host [ ":" port ]
 //*               "/" *( segment-nz "/" )
 fn serviceRoot<'a>(input: Input<'a>, service_root: &'a str) -> IResult<Input<'a>, Input<'a>> {
-	// FIXME this should be relaxed to accept case-insensitive http(s), default ports, etc
-	tag(service_root)(input)
+    // FIXME this should be relaxed to accept case-insensitive http(s), default ports, etc
+    tag(service_root)(input)
 }
 
 //*
@@ -395,27 +401,58 @@ fn serviceRoot<'a>(input: Input<'a>, service_root: &'a str) -> IResult<Input<'a>
 //*                  / '$entity' "/" qualifiedEntityTypeName "?" entityCastOptions
 //*                  / '$metadata' [ "?" metadataOptions ] [ context ]
 //*                  / resourcePath [ "?" queryOptions ]
-fn odataRelativeUri<'a>(input: Input<'a>, doc: &'a schema::Document<'a>)-> IResult<Input<'a>, ast::RelativeURI<'a>> {
-	let (path, input) = input.split_at(input.data.find('?').unwrap_or(input.len()));
-	let (query, fragment) = input.split_at(input.data.find('#').unwrap_or(input.len()));
-	//FIXME we should split and decode path here isntead of parsing it as a string
-	// let path = path.split('/');
+fn odataRelativeUri<'a>(
+    input: Input<'a>,
+    doc: &'a schema::Document<'a>,
+) -> IResult<Input<'a>, ast::RelativeURI<'a>> {
+    let (path, input) = input.split_at(input.data.find('?').unwrap_or(input.len()));
+    let (query, fragment) = input.split_at(input.data.find('#').unwrap_or(input.len()));
+    //FIXME we should split and decode path here isntead of parsing it as a string
+    // let path = path.split('/');
 
-	return alt((
-		map(preceded(tag("$batch"), opt(preceded(tag("?"), batchOptions))), ast::RelativeURI::Batch),
-		value(ast::RelativeURI::Entity, tuple((tag("$entity"), tag("?"), entityOptions))),
-		value(ast::RelativeURI::Entity, tuple((tag("$entity/"), qualifiedEntityTypeName, tag("?"), entityCastOptions))),
-		value(ast::RelativeURI::Metadata, tuple((tag("$metadata"), opt(tuple((tag("?"), metadataOptions))), opt(context)))),
-		|input: Input<'a>| {
-			// FIXME fully computing the resourcePath expression needs the parameter aliases
-			// FIXME we have to ensure that the full path was consumed
-			let (input, resource) = all_consuming(|i| resourcePath(i, &doc.entity_container))(path.clone())?;
+    return alt((
+        map(
+            preceded(tag("$batch"), opt(preceded(tag("?"), batchOptions))),
+            ast::RelativeURI::Batch,
+        ),
+        value(
+            ast::RelativeURI::Entity,
+            tuple((tag("$entity"), tag("?"), entityOptions)),
+        ),
+        value(
+            ast::RelativeURI::Entity,
+            tuple((
+                tag("$entity/"),
+                qualifiedEntityTypeName,
+                tag("?"),
+                entityCastOptions,
+            )),
+        ),
+        value(
+            ast::RelativeURI::Metadata,
+            tuple((
+                tag("$metadata"),
+                opt(tuple((tag("?"), metadataOptions))),
+                opt(context),
+            )),
+        ),
+        |input: Input<'a>| {
+            // FIXME fully computing the resourcePath expression needs the parameter aliases
+            // FIXME we have to ensure that the full path was consumed
+            let (input, resource) =
+                all_consuming(|i| resourcePath(i, &doc.entity_container))(path.clone())?;
 
-			// let kind = ast::kind::PathKind::Single(ast::kind::Kind::Entity())
-			let (input, options) = opt(preceded(tag("?"), |i| queryOptions_wip(i)))(query.clone())?;
-			Ok((input, ast::RelativeURI::Resource(ast::ResourcePath{resource: resource, options})))
-		},
-	))(input);
+            // let kind = ast::kind::PathKind::Single(ast::kind::Kind::Entity())
+            let (input, options) = opt(preceded(tag("?"), |i| queryOptions_wip(i)))(query.clone())?;
+            Ok((
+                input,
+                ast::RelativeURI::Resource(ast::ResourcePath {
+                    resource: resource,
+                    options,
+                }),
+            ))
+        },
+    ))(input);
 }
 
 //*
@@ -436,8 +473,11 @@ fn odataRelativeUri<'a>(input: Input<'a>, doc: &'a schema::Document<'a>)-> IResu
 //*              / functionImportCallNoParens
 //*              / crossjoin
 //*              / '$all'                         [ "/" qualifiedEntityTypeName ]
-fn resourcePath<'a>(input: Input<'a>, entity_container: &'a schema::EntityContainer<'a>) -> ExprOutput<'a> {
-	return alt((
+fn resourcePath<'a>(
+    input: Input<'a>,
+    entity_container: &'a schema::EntityContainer<'a>,
+) -> ExprOutput<'a> {
+    return alt((
 		|i| {
 			let (i, entity_set) = expr(map(|i| entitySetName_wip(i, entity_container), ExprKind::EntitySet))(i)?;
 			let (i, nav) = opt(|i| collectionNavigation_wip(i, &entity_set))(i)?;
@@ -465,11 +505,13 @@ fn resourcePath<'a>(input: Input<'a>, entity_container: &'a schema::EntityContai
 //* collectionNavigation = [ "/" qualifiedEntityTypeName ] [ collectionNavPath ]
 named!(collectionNavigation<Input, Input>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedEntityTypeName))), opt(collectionNavPath))))));
 fn collectionNavigation_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
-	let (input, cast) = opt(preceded(tag("/"), |i| qualifiedEntityTypeName_wip(i, child)))(input)?;
-	let (input, path) = opt(|i| collectionNavPath_wip(i, cast.as_ref().unwrap_or(child)))(input)?;
+    let (input, cast) = opt(preceded(tag("/"), |i| {
+        qualifiedEntityTypeName_wip(i, child)
+    }))(input)?;
+    let (input, path) = opt(|i| collectionNavPath_wip(i, cast.as_ref().unwrap_or(child)))(input)?;
 
-	// FIXME we should error out if none of the above matched. Also, one less Rc :)
-	Ok((input, path.or(cast).unwrap_or_else(|| Rc::clone(child))))
+    // FIXME we should error out if none of the above matched. Also, one less Rc :)
+    Ok((input, path.or(cast).unwrap_or_else(|| Rc::clone(child))))
 }
 //* collectionNavPath    = keyPredicate [ singleNavigation ]
 //*                      / filterInPath [ collectionNavigation ]
@@ -489,110 +531,122 @@ named!(collectionNavPath<Input, Input>, call!(alt((recognize(tuple((keyPredicate
 					   , _ref
 					))));
 fn collectionNavPath_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
-	alt((
-		|i| {
-			let (i, filter) = filterInPath_wip(i, child)?;
-			let (i, path) = opt(|i| collectionNavigation_wip(i, &filter))(i)?;
+    alt((
+        |i| {
+            let (i, filter) = filterInPath_wip(i, child)?;
+            let (i, path) = opt(|i| collectionNavigation_wip(i, &filter))(i)?;
 
-			Ok((i, path.unwrap_or(filter)))
-		},
-		|i| {
-			let (input, each) = each_wip2(i, child)?;
-			let (input, bound_op) = opt(|i| boundOperation_wip2(i, &each))(input)?;
+            Ok((i, path.unwrap_or(filter)))
+        },
+        |i| {
+            let (input, each) = each_wip2(i, child)?;
+            let (input, bound_op) = opt(|i| boundOperation_wip2(i, &each))(input)?;
 
-			Ok((input, bound_op.unwrap_or(each)))
-		},
-		|i| boundOperation_wip2(i, child),
-		|i| count_wip2(i, child),
-		|i| _ref_wip2(i, child),
-		|i| {
-			let (i, key) = keyPredicate_wip(i, child)?;
-			// let (i, path) = opt(|i| singleNavigation_wip(i, &key))(i)?;
+            Ok((input, bound_op.unwrap_or(each)))
+        },
+        |i| boundOperation_wip2(i, child),
+        |i| count_wip2(i, child),
+        |i| _ref_wip2(i, child),
+        |i| {
+            let (i, key) = keyPredicate_wip(i, child)?;
+            // let (i, path) = opt(|i| singleNavigation_wip(i, &key))(i)?;
 
-			Ok((i, key))
-		},
-	))(input)
+            Ok((i, key))
+        },
+    ))(input)
 }
 
 //*
 //* keyPredicate     = simpleKey / compoundKey / keyPathSegments
 named!(keyPredicate<Input, Input>, call!(alt((simpleKey, compoundKey, keyPathSegments))));
 fn keyPredicate_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
-	alt((|i| simpleKey_wip(i, child), |i| compoundKey_wip(i, child), |i| keyPathSegments_wip(i, child)))(input)
+    alt((
+        |i| simpleKey_wip(i, child),
+        |i| compoundKey_wip(i, child),
+        |i| keyPathSegments_wip(i, child),
+    ))(input)
 }
 //* simpleKey        = OPEN ( parameterAlias / keyPropertyValue ) CLOSE
 named!(simpleKey<Input, Input>, call!(recognize(tuple((OPEN, alt((parameterAlias, keyPropertyValue)), CLOSE)))));
 fn simpleKey_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
-	let value = alt((
-		|i| keyPropertyValue_wip(i),
-		// FIXME
-		expr(map(parameterAlias_wip, |_| ExprKind::Var(Rc::new(input.parser.expr(ExprKind::Unimplemented))))),
-	));
+    let value = alt((
+        |i| keyPropertyValue_wip(i),
+        // FIXME
+        expr(map(parameterAlias_wip, |_| {
+            ExprKind::Var(Rc::new(input.parser.expr(ExprKind::Unimplemented)))
+        })),
+    ));
 
-	expr(map(delimited(OPEN, value, CLOSE), |k| ExprKind::Binary(ast::BinOp::Eq, Rc::new(input.parser.expr(ExprKind::Unimplemented)), k)))(input.clone())
+    expr(map(delimited(OPEN, value, CLOSE), |k| {
+        ExprKind::Binary(
+            ast::BinOp::Eq,
+            Rc::new(input.parser.expr(ExprKind::Unimplemented)),
+            k,
+        )
+    }))(input.clone())
 }
 //* compoundKey      = OPEN keyValuePair *( COMMA keyValuePair ) CLOSE
 named!(compoundKey<Input, Input>, call!(recognize(tuple((OPEN, keyValuePair, many0(tuple((COMMA, keyValuePair))), CLOSE)))));
 fn compoundKey_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
-	Err(Err::Error((input, ErrorKind::Verify)))
-	// let collection: ast::ty::Collection = typecheck(child.ty, input)?;
-	// let entity: ast::ty::Entity = typecheck(collection, input)?;
+    Err(Err::Error((input, ErrorKind::Verify)))
+    // let collection: ast::ty::Collection = typecheck(child.ty, input)?;
+    // let entity: ast::ty::Entity = typecheck(collection, input)?;
 
-	// let key = entity.key.ok_or(Err(Err::Error((input, ErrorKind::Verify))))?;
+    // let key = entity.key.ok_or(Err(Err::Error((input, ErrorKind::Verify))))?;
 
-	// let values: Vec<Option<Rc<Expr>>> = vec![None, key.len()];
+    // let values: Vec<Option<Rc<Expr>>> = vec![None, key.len()];
 
-	// for idx in [0..key.len()] {
-	// 	if idx > 0 {
+    // for idx in [0..key.len()] {
+    // 	if idx > 0 {
 
-	// 	}
-	// 	let (i, key) = verify(keyValuePair_wip(i, keys), |key| values[key].is_none())(input)?;
-	// 	input = i;
-	// 	values[key] =
-	// }
+    // 	}
+    // 	let (i, key) = verify(keyValuePair_wip(i, keys), |key| values[key].is_none())(input)?;
+    // 	input = i;
+    // 	values[key] =
+    // }
 
-	// map(delimited(OPEN, separated_nonempty_list(COMMA, |i| keyValuePair_wip(i, props, key)), CLOSE), |v| ast::KeyPredicate{values: v})(input)
+    // map(delimited(OPEN, separated_nonempty_list(COMMA, |i| keyValuePair_wip(i, props, key)), CLOSE), |v| ast::KeyPredicate{values: v})(input)
 }
 
 //* keyValuePair     = ( primitiveKeyProperty / keyPropertyAlias  ) EQ ( parameterAlias / keyPropertyValue )
 named!(keyValuePair<Input, Input>, call!(recognize(tuple((alt((primitiveKeyProperty, keyPropertyAlias)), EQ, alt((parameterAlias, keyPropertyValue)))))));
 fn keyValuePair_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
-	Err(Err::Error((input, ErrorKind::Verify)))
-	// let (input, property) = map_opt(alt((primitiveKeyProperty, keyPropertyAlias)), |n| props.get(n))(input)?;
-	// let (input, value) = preceded(EQ, alt((map(parameterAlias_wip, ast::KeyValue::ParameterAlias), |i| keyPropertyValue_wip(i, property))))(input)?;
+    Err(Err::Error((input, ErrorKind::Verify)))
+    // let (input, property) = map_opt(alt((primitiveKeyProperty, keyPropertyAlias)), |n| props.get(n))(input)?;
+    // let (input, value) = preceded(EQ, alt((map(parameterAlias_wip, ast::KeyValue::ParameterAlias), |i| keyPropertyValue_wip(i, property))))(input)?;
 
-	// Ok((input, ast::KeyProperty{property, value}))
+    // Ok((input, ast::KeyProperty{property, value}))
 }
 //* keyPropertyValue = primitiveLiteral
 named!(keyPropertyValue<Input, Input>, call!(recognize(primitiveLiteral)));
 // FIXME validate the primitive against the property type
 fn keyPropertyValue_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
-	expr(map(|i| primitiveLiteral_wip(i), ExprKind::Lit))(input)
+    expr(map(|i| primitiveLiteral_wip(i), ExprKind::Lit))(input)
 }
 //* keyPropertyAlias = odataIdentifier
 named!(keyPropertyAlias<Input, Input>, call!(recognize(odataIdentifier)));
 //* keyPathSegments  = 1*( "/" keyPathLiteral )
 named!(keyPathSegments<Input, Input>, call!(recognize(many1(tuple((tag("/"), keyPathLiteral))))));
 fn keyPathSegments_wip<'a>(mut input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
-	Err(Err::Error((input, ErrorKind::Verify)))
-	// let mut result = vec![];
+    Err(Err::Error((input, ErrorKind::Verify)))
+    // let mut result = vec![];
 
-	// for name in key {
-	// 	let (i, value) = preceded(tag("/"), |i| keyPathLiteral_wip(i, props.get(name).unwrap()))(input)?;
-	// 	input = i;
+    // for name in key {
+    // 	let (i, value) = preceded(tag("/"), |i| keyPathLiteral_wip(i, props.get(name).unwrap()))(input)?;
+    // 	input = i;
 
-	// 	result.push(value);
-	// }
+    // 	result.push(value);
+    // }
 
-	// Ok((input, ast::KeyPredicate{values: result}))
+    // Ok((input, ast::KeyPredicate{values: result}))
 }
 //* keyPathLiteral   = *pchar
 // FIXME This rule is overly generic. It should be matching the primitive value that the particular
 // property has
 named!(keyPathLiteral<Input, Input>, call!(recognize(many0(pchar))));
 fn keyPathLiteral_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
-	unimplemented!()
-	// map(recognize(many0(pchar)), |n: Input| ast::KeyProperty{property, value: ast::KeyValue::Value(n.data)})(input)
+    unimplemented!()
+    // map(recognize(many0(pchar)), |n: Input| ast::KeyProperty{property, value: ast::KeyValue::Value(n.data)})(input)
 }
 //*
 //* singleNavigation = [ "/" qualifiedEntityTypeName ]
@@ -606,25 +660,33 @@ named!(singleNavigation<Input, Input>, call!(recognize(tuple((opt(tuple((tag("/"
 														   , _ref
 														   , _value
 														   ))))))));
-fn singleNavigation_wip<'a>(input: Input<'a>, kind: &'a schema::ty::Entity<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
-	//FIXME
-	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedEntityTypeName)))(input)?;
-	let (input, path) = opt(alt((
-		preceded(tag("/"), |i| propertyPath_wip(i, &kind.structural_props, &kind.navigation_props)),
-		|i| boundOperation_wip(i),
-		map(_ref_wip, |s| vec![s]),
-		map(_value_wip, |s| vec![s]),
-	)))(input)?;
+fn singleNavigation_wip<'a>(
+    input: Input<'a>,
+    kind: &'a schema::ty::Entity<'a>,
+) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
+    //FIXME
+    let (input, cast) = opt(value(
+        ast::PathSegment::Cast,
+        preceded(tag("/"), qualifiedEntityTypeName),
+    ))(input)?;
+    let (input, path) = opt(alt((
+        preceded(tag("/"), |i| {
+            propertyPath_wip(i, &kind.structural_props, &kind.navigation_props)
+        }),
+        |i| boundOperation_wip(i),
+        map(_ref_wip, |s| vec![s]),
+        map(_value_wip, |s| vec![s]),
+    )))(input)?;
 
-	let mut result = vec![];
-	if let Some(cast) = cast {
-		result.push(cast);
-	}
-	if let Some(mut path) = path {
-		result.append(&mut path);
-	}
+    let mut result = vec![];
+    if let Some(cast) = cast {
+        result.push(cast);
+    }
+    if let Some(mut path) = path {
+        result.append(&mut path);
+    }
 
-	Ok((input, result))
+    Ok((input, result))
 }
 //*
 //* propertyPath = entityColNavigationProperty [ collectionNavigation ]
@@ -642,53 +704,54 @@ named!(propertyPath<Input, Input>, call!(recognize(alt((tuple((entityColNavigati
 						 , tuple((primitiveProperty, opt(primitivePath)))
 						 , tuple((streamProperty, opt(boundOperation)))
 						 )))));
-fn propertyPath_wip<'a>(input: Input<'a>, structural: &'a HashMap<schema::Identifier, schema::property::Structural<'a>>, navigation: &'a HashMap<schema::Identifier, schema::property::Navigation<'a>>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
-	unimplemented!();
-	// use schema::ty;
-	// use schema::ty::Ty;
-	// use schema::property::*;
+fn propertyPath_wip<'a>(
+    input: Input<'a>,
+    structural: &'a HashMap<schema::Identifier, schema::property::Structural<'a>>,
+    navigation: &'a HashMap<schema::Identifier, schema::property::Navigation<'a>>,
+) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
+    unimplemented!();
+    // use schema::ty;
+    // use schema::ty::Ty;
+    // use schema::property::*;
 
-	// let (input, property) = map_opt(odataIdentifier, |name| properties.get(name.data))(input)?;
+    // let (input, property) = map_opt(odataIdentifier, |name| properties.get(name.data))(input)?;
 
-	// let (input, path) = match property.borrow() {
-	// 	PropertyRef::Navigation(Navigation{ty, collection: true, ..}) => unimplemented!(), //opt(|i| collectionNavigation_wip(i, kind))(input)?,
-	// 	PropertyRef::Navigation(Navigation{ty, collection: false, ..}) => opt(|i| singleNavigation_wip(i, ty))(input)?,
-	// 	PropertyRef::Structural(Structural{ty: Ty::Complex(kind), collection: true, ..}) => opt(|i| complexColPath_wip(i, &kind))(input)?,
-	// 	PropertyRef::Structural(Structural{ty: Ty::Complex(kind), collection: false, ..}) => opt(|i| complexPath_wip(i, &kind))(input)?,
-	// 	PropertyRef::Structural(Structural{ty: Ty::Primitive(ty::Primitive::Stream), ..}) => opt(|i| boundOperation_wip(i))(input)?,
-	// 	PropertyRef::Structural(Structural{ty: Ty::Primitive(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i))(input)?,
-	// 	PropertyRef::Structural(Structural{ty: Ty::Primitive(_), collection: false, ..}) => opt(|i| primitivePath_wip(i))(input)?,
-	// 	PropertyRef::Structural(Structural{ty: Ty::Enum(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i))(input)?,
-	// 	PropertyRef::Structural(Structural{ty: Ty::Enum(_), collection: false, ..}) => opt(|i| primitivePath_wip(i))(input)?,
-	// };
+    // let (input, path) = match property.borrow() {
+    // 	PropertyRef::Navigation(Navigation{ty, collection: true, ..}) => unimplemented!(), //opt(|i| collectionNavigation_wip(i, kind))(input)?,
+    // 	PropertyRef::Navigation(Navigation{ty, collection: false, ..}) => opt(|i| singleNavigation_wip(i, ty))(input)?,
+    // 	PropertyRef::Structural(Structural{ty: Ty::Complex(kind), collection: true, ..}) => opt(|i| complexColPath_wip(i, &kind))(input)?,
+    // 	PropertyRef::Structural(Structural{ty: Ty::Complex(kind), collection: false, ..}) => opt(|i| complexPath_wip(i, &kind))(input)?,
+    // 	PropertyRef::Structural(Structural{ty: Ty::Primitive(ty::Primitive::Stream), ..}) => opt(|i| boundOperation_wip(i))(input)?,
+    // 	PropertyRef::Structural(Structural{ty: Ty::Primitive(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i))(input)?,
+    // 	PropertyRef::Structural(Structural{ty: Ty::Primitive(_), collection: false, ..}) => opt(|i| primitivePath_wip(i))(input)?,
+    // 	PropertyRef::Structural(Structural{ty: Ty::Enum(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i))(input)?,
+    // 	PropertyRef::Structural(Structural{ty: Ty::Enum(_), collection: false, ..}) => opt(|i| primitivePath_wip(i))(input)?,
+    // };
 
-	// let mut result = vec![ast::PathSegment::Property(property)];
-	// if let Some(mut path) = path {
-	// 	result.append(&mut path);
-	// }
+    // let mut result = vec![ast::PathSegment::Property(property)];
+    // if let Some(mut path) = path {
+    // 	result.append(&mut path);
+    // }
 
-	// Ok((input, result))
+    // Ok((input, result))
 }
 
 //*
 //* primitiveColPath = count / boundOperation / ordinalIndex
 named!(primitiveColPath<Input, Input>, call!(alt((count, boundOperation, ordinalIndex))));
 fn primitiveColPath_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
-	alt((
-		map(count_wip, |c| vec![c]),
-		|i| boundOperation_wip(i),
-		map(|i| ordinalIndex_wip(i), |index| vec![index]),
-	))(input)
+    alt((
+        map(count_wip, |c| vec![c]),
+        |i| boundOperation_wip(i),
+        map(|i| ordinalIndex_wip(i), |index| vec![index]),
+    ))(input)
 }
 
 //*
 //* primitivePath  = value / boundOperation
 named!(primitivePath<Input, Input>, call!(alt((_value, boundOperation))));
 fn primitivePath_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
-	alt((
-		map(_value_wip, |c| vec![c]),
-		|i| boundOperation_wip(i)
-	))(input)
+    alt((map(_value_wip, |c| vec![c]), |i| boundOperation_wip(i)))(input)
 }
 //*
 //* complexColPath = ordinalIndex
@@ -696,23 +759,30 @@ fn primitivePath_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathSe
 //  errata: The ABNF doesn't allow selecting a specific element and then continuing with a complexPath
 //  rule. Is this a mistake?
 named!(complexColPath<Input, Input>, call!(alt((ordinalIndex, recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((count, boundOperation))))))))));
-fn complexColPath_wip<'a>(input: Input<'a>, kind: &'a schema::ty::Complex) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
-	alt((
-		map(|i| ordinalIndex_wip(i), |index| vec![index]),
-		|input| {
-			let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedComplexTypeName)))(input)?;
-			let (input, path) = opt(alt((map(count_wip, |s| vec![s]), |i| boundOperation_wip(i))))(input)?;
+fn complexColPath_wip<'a>(
+    input: Input<'a>,
+    kind: &'a schema::ty::Complex,
+) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
+    alt(
+        (map(|i| ordinalIndex_wip(i), |index| vec![index]), |input| {
+            let (input, cast) = opt(value(
+                ast::PathSegment::Cast,
+                preceded(tag("/"), qualifiedComplexTypeName),
+            ))(input)?;
+            let (input, path) = opt(alt((map(count_wip, |s| vec![s]), |i| {
+                boundOperation_wip(i)
+            })))(input)?;
 
-			let mut result = vec![];
-			if let Some(cast) = cast {
-				result.push(cast);
-			}
-			if let Some(mut path) = path {
-				result.append(&mut path);
-			}
-			Ok((input, result))
-		}
-	))(input)
+            let mut result = vec![];
+            if let Some(cast) = cast {
+                result.push(cast);
+            }
+            if let Some(mut path) = path {
+                result.append(&mut path);
+            }
+            Ok((input, result))
+        }),
+    )(input)
 }
 //*
 //* complexPath    = [ "/" qualifiedComplexTypeName ]
@@ -720,51 +790,62 @@ fn complexColPath_wip<'a>(input: Input<'a>, kind: &'a schema::ty::Complex) -> IR
 //*                  / boundOperation
 //*                  ]
 named!(complexPath<Input, Input>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((recognize(tuple((tag("/"), propertyPath))), boundOperation))))))));
-fn complexPath_wip<'a>(input: Input<'a>, kind: &'a schema::ty::Complex<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
-	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedComplexTypeName)))(input)?;
-	let (input, path) = opt(alt((
-		preceded(tag("/"), |i| propertyPath_wip(i, &kind.structural_props, &kind.navigation_props)),
-		|i| boundOperation_wip(i),
-	)))(input)?;
+fn complexPath_wip<'a>(
+    input: Input<'a>,
+    kind: &'a schema::ty::Complex<'a>,
+) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
+    let (input, cast) = opt(value(
+        ast::PathSegment::Cast,
+        preceded(tag("/"), qualifiedComplexTypeName),
+    ))(input)?;
+    let (input, path) = opt(alt((
+        preceded(tag("/"), |i| {
+            propertyPath_wip(i, &kind.structural_props, &kind.navigation_props)
+        }),
+        |i| boundOperation_wip(i),
+    )))(input)?;
 
-	let mut result = vec![];
-	if let Some(cast) = cast {
-		result.push(cast);
-	}
-	if let Some(mut path) = path {
-		result.append(&mut path);
-	}
-	Ok((input, result))
+    let mut result = vec![];
+    if let Some(cast) = cast {
+        result.push(cast);
+    }
+    if let Some(mut path) = path {
+        result.append(&mut path);
+    }
+    Ok((input, result))
 }
 //*
 //* filterInPath = '/$filter' EQ parameterAlias
 named!(filterInPath<Input, Input>, call!(recognize(tuple((tag("/$filter"), EQ, parameterAlias)))));
 fn filterInPath_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
-	expr(map(preceded(tuple((tag("/$filter"), EQ)), parameterAlias_wip2), |param| ExprKind::Filter(Rc::clone(child), param)))(input)
+    expr(map(
+        preceded(tuple((tag("/$filter"), EQ)), parameterAlias_wip2),
+        |param| ExprKind::Filter(Rc::clone(child), param),
+    ))(input)
 }
 //*
 //* each  = '/$each'
 named!(each<Input, Input>, call!(tag("/$each")));
 named!(each_wip<Input, ast::PathSegment>, call!(value(ast::PathSegment::Each, tag("/$each"))));
 fn each_wip2<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
-	//FIXME typecheck that input type is a collection
-	// typecheck::<ast::ty::Collection>(child)?
-	expr(map(tag("/$each"), |_| ExprKind::Each(Rc::clone(child))))(input)
+    //FIXME typecheck that input type is a collection
+    // typecheck::<ast::ty::Collection>(child)?
+    expr(map(tag("/$each"), |_| ExprKind::Each(Rc::clone(child))))(input)
 }
 //* count = '/$count'
 named!(count<Input, Input>, call!(tag("/$count")));
 named!(count_wip<Input, ast::PathSegment>, call!(value(ast::PathSegment::Count, tag("/$count"))));
 fn count_wip2<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
-	//FIXME typecheck that input type is a collection
-	// typecheck::<ast::ty::Collection>(child)?
-	expr(map(tag("/$count"), |_| ExprKind::Count(Rc::clone(child))))(input)
+    //FIXME typecheck that input type is a collection
+    // typecheck::<ast::ty::Collection>(child)?
+    expr(map(tag("/$count"), |_| ExprKind::Count(Rc::clone(child))))(input)
 }
 //* ref   = '/$ref'
 named!(_ref<Input, Input>, call!(tag("/$ref")));
 named!(_ref_wip<Input, ast::PathSegment>, call!(value(ast::PathSegment::Ref, tag("/$ref"))));
 fn _ref_wip2<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
-	//FIXME typecheck that input type is a collection
-	expr(map(tag("/$ref"), |_| ExprKind::Ref(Rc::clone(child))))(input)
+    //FIXME typecheck that input type is a collection
+    expr(map(tag("/$ref"), |_| ExprKind::Ref(Rc::clone(child))))(input)
 }
 //* value = '/$value'
 named!(_value<Input, Input>, call!(tag("/$value")));
@@ -776,7 +857,15 @@ named!(_value_wip<Input, ast::PathSegment>, call!(value(ast::PathSegment::Value,
 //  http://docs.oasis-open.org/odata/odata/v4.01/cs01/part1-protocol/odata-v4.01-cs01-part1-protocol.html#sec_RequestinganIndividualMemberofanOrde
 named!(ordinalIndex<Input, Input>, call!(recognize(tuple((tag("/"), many1(DIGIT))))));
 fn ordinalIndex_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::PathSegment<'a>> {
-	map(preceded(tag("/"), map_res(recognize(tuple((opt(tag("-")), digit1))), |n: Input| n.data.parse())), ast::PathSegment::OrdinalIndex)(input)
+    map(
+        preceded(
+            tag("/"),
+            map_res(recognize(tuple((opt(tag("-")), digit1))), |n: Input| {
+                n.data.parse()
+            }),
+        ),
+        ast::PathSegment::OrdinalIndex,
+    )(input)
 }
 //*
 //* ; boundOperation segments can only be composed if the type of the previous segment
@@ -801,12 +890,12 @@ named!(boundOperation<Input, Input>, call!(recognize(tuple((tag("/"), alt((bound
 								     , boundFunctionCallNoParens
 								     )))))));
 fn boundOperation_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
-	// FIXME
-	value(vec![], boundOperation)(input)
+    // FIXME
+    value(vec![], boundOperation)(input)
 }
 fn boundOperation_wip2<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
-	// FIXME
-	Err(nom::Err::Error((input, nom::error::ErrorKind::Alt)))
+    // FIXME
+    Err(nom::Err::Error((input, nom::error::ErrorKind::Alt)))
 }
 //*
 //* actionImportCall = actionImport
@@ -886,8 +975,10 @@ named!(parameterName<Input, Input>, call!(recognize(odataIdentifier)));
 named!(parameterAlias<Input, Input>, call!(preceded(AT, odataIdentifier)));
 named!(parameterAlias_wip<Input, ast::ParameterAlias>, call!(map(preceded(AT, odataIdentifier), |name| ast::ParameterAlias{name: name.data})));
 fn parameterAlias_wip2<'a>(input: Input<'a>) -> ExprOutput<'a> {
-	// FIXME resolve scope and assign proper nodeid
-	expr(map(preceded(AT, odataIdentifier), |name| ExprKind::Var(Rc::new(input.parser.expr(ExprKind::Unimplemented)))))(input.clone())
+    // FIXME resolve scope and assign proper nodeid
+    expr(map(preceded(AT, odataIdentifier), |name| {
+        ExprKind::Var(Rc::new(input.parser.expr(ExprKind::Unimplemented)))
+    }))(input.clone())
 }
 //*
 //* crossjoin = '$crossjoin' OPEN
@@ -903,7 +994,7 @@ named!(crossjoin<Input, Input>, call!(recognize(tuple((tag("$crossjoin"), OPEN, 
 //* queryOptions = queryOption *( "&" queryOption )
 named!(queryOptions<Input, Input>, call!(recognize(tuple((queryOption, many0(tuple((tag("&"), queryOption))))))));
 fn queryOptions_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::QueryOption<'a>>> {
-	separated_nonempty_list(tag("&"), |i| queryOption_wip(i))(input)
+    separated_nonempty_list(tag("&"), |i| queryOption_wip(i))(input)
 }
 //* queryOption  = systemQueryOption
 //*              / aliasAndValue
@@ -911,12 +1002,12 @@ fn queryOptions_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::QueryOp
 //*              / customQueryOption
 named!(queryOption<Input, Input>, call!(alt((systemQueryOption, aliasAndValue, nameAndValue, customQueryOption))));
 fn queryOption_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::QueryOption<'a>> {
-	alt((
-		|i| systemQueryOption_wip(i),
-		value(ast::QueryOption::Alias, aliasAndValue),
-		value(ast::QueryOption::Name, nameAndValue),
-		customQueryOption_wip,
-	))(input)
+    alt((
+        |i| systemQueryOption_wip(i),
+        value(ast::QueryOption::Alias, aliasAndValue),
+        value(ast::QueryOption::Name, nameAndValue),
+        customQueryOption_wip,
+    ))(input)
 }
 //*
 //* batchOptions = batchOption *( "&" batchOption )
@@ -977,23 +1068,23 @@ named!(systemQueryOption<Input, Input>, call!(alt((compute
 					   , top
 					   , index))));
 fn systemQueryOption_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::QueryOption<'a>> {
-	alt((
-		value(ast::QueryOption::Compute, compute),
-		value(ast::QueryOption::DeltaToken, deltatoken),
-		value(ast::QueryOption::Expand, expand),
-		|i| filter_wip(i),
-		format_wip,
-		value(ast::QueryOption::Id, id),
-		value(ast::QueryOption::InlineCount, inlinecount),
-		value(ast::QueryOption::OrderBy, orderby),
-		value(ast::QueryOption::SchemaVersion, schemaversion),
-		value(ast::QueryOption::Search, search),
-		value(ast::QueryOption::Select, select),
-		value(ast::QueryOption::Skip, skip),
-		value(ast::QueryOption::SkipToken, skiptoken),
-		value(ast::QueryOption::Top, top),
-		value(ast::QueryOption::Index, index),
-	))(input)
+    alt((
+        value(ast::QueryOption::Compute, compute),
+        value(ast::QueryOption::DeltaToken, deltatoken),
+        value(ast::QueryOption::Expand, expand),
+        |i| filter_wip(i),
+        format_wip,
+        value(ast::QueryOption::Id, id),
+        value(ast::QueryOption::InlineCount, inlinecount),
+        value(ast::QueryOption::OrderBy, orderby),
+        value(ast::QueryOption::SchemaVersion, schemaversion),
+        value(ast::QueryOption::Search, search),
+        value(ast::QueryOption::Select, select),
+        value(ast::QueryOption::Skip, skip),
+        value(ast::QueryOption::SkipToken, skiptoken),
+        value(ast::QueryOption::Top, top),
+        value(ast::QueryOption::Index, index),
+    ))(input)
 }
 
 //*
@@ -1023,7 +1114,6 @@ named!(expandItem<Input, Input>, call!(recognize(alt((recognize(tuple((STAR, opt
 									 )))
 								  )))
 						)))));
-
 
 //* expandPath        = [ ( qualifiedEntityTypeName / qualifiedComplexTypeName ) "/" ]
 //*                     *( ( complexProperty / complexColProperty ) "/" [ qualifiedComplexTypeName "/" ] )
@@ -1057,9 +1147,9 @@ named!(levels<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$levels"),
 //* filter = ( "$filter" / "filter" ) EQ boolCommonExpr
 named!(filter<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$filter"), tag_no_case("filter"))), EQ, boolCommonExpr)))));
 fn filter_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::QueryOption<'a>> {
-	let (input, _) = cut(tuple((opt(tag("$")), tag_no_case("filter"), EQ)))(input)?;
+    let (input, _) = cut(tuple((opt(tag("$")), tag_no_case("filter"), EQ)))(input)?;
 
-	map(|i| commonExpr_wip(i, 0), ast::QueryOption::Filter)(input)
+    map(|i| commonExpr_wip(i, 0), ast::QueryOption::Filter)(input)
 }
 //*
 //* orderby     = ( "$orderby" / "orderby" ) EQ orderbyItem *( COMMA orderbyItem )
@@ -1354,58 +1444,64 @@ named!(commonExpr<Input, Input>, call!(recognize(tuple((
 						 opt(alt((andExpr, orExpr)))
 					)))));
 fn commonExpr_wip<'a>(input: Input<'a>, prec: u8) -> ExprOutput<'a> {
-	let (mut input, mut lhs) = alt((
-			 expr(map(|i| primitiveLiteral_wip(i), ExprKind::Lit)),
-			 // arrayOrObject,
-			 // rootExpr,
-			 // expr(map(|i| firstMemberExpr_wip(i), ExprKind::Member)),
-			 // functionExpr,
-			 |i| negateExpr_wip(i),
-			 |i| methodCallExpr_wip(i),
-			 |i| parenExpr_wip(i),
-			 // castExpr,
-			 // isofExpr,
-			 |i| notExpr_wip(i),
-	))(input)?;
+    let (mut input, mut lhs) = alt((
+        expr(map(|i| primitiveLiteral_wip(i), ExprKind::Lit)),
+        // arrayOrObject,
+        // rootExpr,
+        // expr(map(|i| firstMemberExpr_wip(i), ExprKind::Member)),
+        // functionExpr,
+        |i| negateExpr_wip(i),
+        |i| methodCallExpr_wip(i),
+        |i| parenExpr_wip(i),
+        // castExpr,
+        // isofExpr,
+        |i| notExpr_wip(i),
+    ))(input)?;
 
-	while let (i, Some(op)) = opt(verify(|i| binop_wip(i), |op| op.precedence() >= prec))(input.clone())? {
-		let prec = op.precedence();
+    while let (i, Some(op)) =
+        opt(verify(|i| binop_wip(i), |op| op.precedence() >= prec))(input.clone())?
+    {
+        let prec = op.precedence();
 
-		let (i, rhs) = match op {
-			// A list expression is only valid after the `in` operator but it's also ambiguous with the
-			// parenExpr if the list contains only one element. So we try it first
-			ast::BinOp::In => alt((|i| listExpr_wip(i), |i| commonExpr_wip(i, prec)))(i)?,
-			_ => commonExpr_wip(i, prec)?
-		};
+        let (i, rhs) = match op {
+            // A list expression is only valid after the `in` operator but it's also ambiguous with the
+            // parenExpr if the list contains only one element. So we try it first
+            ast::BinOp::In => alt((|i| listExpr_wip(i), |i| commonExpr_wip(i, prec)))(i)?,
+            _ => commonExpr_wip(i, prec)?,
+        };
 
-		input = i;
-		lhs = Rc::new(input.parser.expr(ExprKind::Binary(op, lhs, rhs)));
-	}
+        input = i;
+        lhs = Rc::new(input.parser.expr(ExprKind::Binary(op, lhs, rhs)));
+    }
 
-	Ok((input, lhs))
+    Ok((input, lhs))
 }
 
 fn binop_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::BinOp> {
-		// TODO sort them by frequency for better performance
-		// FIXME use FromStr just like the method call
-		delimited(RWS, alt((
-			value(ast::BinOp::Add, tag_no_case("add")),
-			value(ast::BinOp::Sub, tag_no_case("sub")),
-			value(ast::BinOp::Mul, tag_no_case("mul")),
-			value(ast::BinOp::Div, tag_no_case("div")),
-			value(ast::BinOp::DivBy, tag_no_case("divby")),
-			value(ast::BinOp::Mod, tag_no_case("mod")),
-			value(ast::BinOp::Eq, tag_no_case("eq")),
-			value(ast::BinOp::Ne, tag_no_case("ne")),
-			value(ast::BinOp::Lt, tag_no_case("lt")),
-			value(ast::BinOp::Le, tag_no_case("le")),
-			value(ast::BinOp::Gt, tag_no_case("gt")),
-			value(ast::BinOp::Ge, tag_no_case("ge")),
-			value(ast::BinOp::Has, tag_no_case("has")),
-			value(ast::BinOp::In, tag_no_case("in")),
-			value(ast::BinOp::And, tag_no_case("and")),
-			value(ast::BinOp::Or, tag_no_case("or")),
-		)), RWS)(input)
+    // TODO sort them by frequency for better performance
+    // FIXME use FromStr just like the method call
+    delimited(
+        RWS,
+        alt((
+            value(ast::BinOp::Add, tag_no_case("add")),
+            value(ast::BinOp::Sub, tag_no_case("sub")),
+            value(ast::BinOp::Mul, tag_no_case("mul")),
+            value(ast::BinOp::Div, tag_no_case("div")),
+            value(ast::BinOp::DivBy, tag_no_case("divby")),
+            value(ast::BinOp::Mod, tag_no_case("mod")),
+            value(ast::BinOp::Eq, tag_no_case("eq")),
+            value(ast::BinOp::Ne, tag_no_case("ne")),
+            value(ast::BinOp::Lt, tag_no_case("lt")),
+            value(ast::BinOp::Le, tag_no_case("le")),
+            value(ast::BinOp::Gt, tag_no_case("gt")),
+            value(ast::BinOp::Ge, tag_no_case("ge")),
+            value(ast::BinOp::Has, tag_no_case("has")),
+            value(ast::BinOp::In, tag_no_case("in")),
+            value(ast::BinOp::And, tag_no_case("and")),
+            value(ast::BinOp::Or, tag_no_case("or")),
+        )),
+        RWS,
+    )(input)
 }
 //*
 //* boolCommonExpr = commonExpr ; resulting in a Boolean
@@ -1419,26 +1515,26 @@ named!(rootExpr<Input, Input>, call!(recognize(tuple((tag("$root/"), alt((recogn
 //*                 / inscopeVariableExpr [ "/" memberExpr ]
 named!(firstMemberExpr<Input, Input>, call!(alt((memberExpr, recognize(tuple((inscopeVariableExpr, opt(tuple((tag("/"), memberExpr))))))))));
 fn firstMemberExpr_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
-	// let (input, node) = alt((
-	// 	|i| memberExpr_wip(i, &state),
-	// 	|i| memberExpr_wip(i, &state),
-	// ))(input)?;
+    // let (input, node) = alt((
+    // 	|i| memberExpr_wip(i, &state),
+    // 	|i| memberExpr_wip(i, &state),
+    // ))(input)?;
 
-	unimplemented!();
+    unimplemented!();
 
-	// map(alt((
-	// 	|i| memberExpr_wip(i),
-	// 	|i| {
-	// 		let (i, var_expr) = inscopeVariableExpr_wip(i)?;
-	// 		let (i, member) = opt(preceded(tag("/"), |i| memberExpr_wip(i)))(i)?;
+    // map(alt((
+    // 	|i| memberExpr_wip(i),
+    // 	|i| {
+    // 		let (i, var_expr) = inscopeVariableExpr_wip(i)?;
+    // 		let (i, member) = opt(preceded(tag("/"), |i| memberExpr_wip(i)))(i)?;
 
-	// 		let mut ret = vec![var_expr];
-	// 		if let Some(mut member) = member {
-	// 			ret.append(&mut member);
-	// 		}
-	// 		Ok((i, ret))
-	// 	},
-	// )), |mut v| { v.reverse(); v })(input)
+    // 		let mut ret = vec![var_expr];
+    // 		if let Some(mut member) = member {
+    // 			ret.append(&mut member);
+    // 		}
+    // 		Ok((i, ret))
+    // 	},
+    // )), |mut v| { v.reverse(); v })(input)
 }
 //*
 //* memberExpr = [ qualifiedEntityTypeName "/" ]
@@ -1448,7 +1544,7 @@ fn firstMemberExpr_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::Path
 //*              )
 named!(memberExpr<Input, Input>, call!(recognize(tuple((opt(tuple((qualifiedEntityTypeName, tag("/")))), alt((propertyPathExpr, boundFunctionExpr, annotationExpr)))))));
 fn memberExpr_wip<'a, 'b>(input: Input<'a>) -> IResult<Input<'a>, ()> {
-	unimplemented!();
+    unimplemented!();
 }
 //*
 //* propertyPathExpr = ( entityColNavigationProperty [ collectionNavigationExpr ]
@@ -1488,7 +1584,7 @@ named!(annotationQualifier<Input, Input>, call!(recognize(odataIdentifier)));
 //TODO(validation)
 named!(inscopeVariableExpr<Input, Input>, call!(alt((implicitVariableExpr, parameterAlias, lambdaVariableExpr))));
 fn inscopeVariableExpr_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::PathSegment<'a>> {
-	unimplemented!();
+    unimplemented!();
 }
 //* implicitVariableExpr = '$it'              ; the current instance of the resource identified by the resource path
 //*                      / '$this'            ; the instance on which the query option is evaluated
@@ -1639,13 +1735,21 @@ named!(methodCallExpr<Input, Input>, call!(alt((
 						))
 					))));
 fn methodCallExpr_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
-	let (input, method) = map_res(take_while1(|c: char| c.is_alphabetic()), |res: Input| ast::Method::from_str(res.data))(input)?;
+    let (input, method) = map_res(take_while1(|c: char| c.is_alphabetic()), |res: Input| {
+        ast::Method::from_str(res.data)
+    })(input)?;
 
-	let (m, n) = method.arity();
+    let (m, n) = method.arity();
 
-	let arg_parser = verify(separated_list(tuple((BWS, COMMA, BWS)), |i| commonExpr_wip(i, 0)), move |v: &Vec<Rc<ast::Expr<'a>>>| m <= v.len() && v.len() <= n);
+    let arg_parser = verify(
+        separated_list(tuple((BWS, COMMA, BWS)), |i| commonExpr_wip(i, 0)),
+        move |v: &Vec<Rc<ast::Expr<'a>>>| m <= v.len() && v.len() <= n,
+    );
 
-	expr(map(delimited(tuple((OPEN, BWS)), arg_parser, tuple((BWS, CLOSE))), move |args| ExprKind::MethodCall(method, args)))(input)
+    expr(map(
+        delimited(tuple((OPEN, BWS)), arg_parser, tuple((BWS, CLOSE))),
+        move |args| ExprKind::MethodCall(method, args),
+    ))(input)
 }
 //*
 //* boolMethodCallExpr = endsWithMethodCallExpr
@@ -1734,13 +1838,20 @@ named!(hasSubsequenceMethodCallExpr<Input, Input>, call!(recognize(tuple((tag_no
 //* parenExpr = OPEN BWS commonExpr BWS CLOSE
 named!(parenExpr<Input, Input>, call!(recognize(tuple((OPEN, BWS, commonExpr, BWS, CLOSE)))));
 fn parenExpr_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
-	delimited(tuple((OPEN, BWS)), |i| commonExpr_wip(i, 0), tuple((BWS, CLOSE)))(input)
+    delimited(
+        tuple((OPEN, BWS)),
+        |i| commonExpr_wip(i, 0),
+        tuple((BWS, CLOSE)),
+    )(input)
 }
 //* listExpr  = OPEN BWS commonExpr BWS *( COMMA BWS commonExpr BWS ) CLOSE
 named!(listExpr<Input, Input>, call!(recognize(tuple((OPEN, BWS, commonExpr, many0(tuple((COMMA, BWS, commonExpr, BWS))), CLOSE)))));
 fn listExpr_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
-	let element_parser = expr(map(separated_nonempty_list(tuple((BWS, COMMA, BWS)), |i| commonExpr_wip(i, 0)), ExprKind::List));
-	delimited(tuple((OPEN, BWS)), element_parser, tuple((BWS, CLOSE)))(input)
+    let element_parser = expr(map(
+        separated_nonempty_list(tuple((BWS, COMMA, BWS)), |i| commonExpr_wip(i, 0)),
+        ExprKind::List,
+    ));
+    delimited(tuple((OPEN, BWS)), element_parser, tuple((BWS, CLOSE)))(input)
 }
 //*
 //* andExpr = RWS "and" RWS boolCommonExpr
@@ -1782,15 +1893,21 @@ named!(modExpr<Input, Input>, call!(recognize(tuple((RWS, tag_no_case("mod"), RW
 //* negateExpr = "-" BWS commonExpr
 named!(negateExpr<Input, Input>, call!(recognize(tuple((tag("-"), BWS, commonExpr)))));
 fn negateExpr_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
-	let op = ast::UnOp::Neg;
-	expr(map(preceded(tag("-"), move |i| commonExpr_wip(i, op.precedence())), move |expr| ExprKind::Unary(op, expr)))(input)
+    let op = ast::UnOp::Neg;
+    expr(map(
+        preceded(tag("-"), move |i| commonExpr_wip(i, op.precedence())),
+        move |expr| ExprKind::Unary(op, expr),
+    ))(input)
 }
 //*
 //* notExpr = "not" RWS boolCommonExpr
 named!(notExpr<Input, Input>, call!(recognize(tuple((tag_no_case("not"), RWS, boolCommonExpr)))));
 fn notExpr_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
-	let op = ast::UnOp::Not;
-	expr(map(preceded(tag("not"), move |i| commonExpr_wip(i, op.precedence())), move |expr| ExprKind::Unary(op, expr)))(input)
+    let op = ast::UnOp::Not;
+    expr(map(
+        preceded(tag("not"), move |i| commonExpr_wip(i, op.precedence())),
+        move |expr| ExprKind::Unary(op, expr),
+    ))(input)
 }
 //*
 //* isofExpr = "isof" OPEN BWS [ commonExpr BWS COMMA BWS ] qualifiedTypeName BWS CLOSE
@@ -1993,9 +2110,11 @@ named!(qualifiedTypeName<Input, Input>, call!(alt((singleQualifiedTypeName
 //a many0 underneath this will fail to backtrack like a regexp would
 named!(qualifiedEntityTypeName<Input, Input>, call!(recognize(tuple((namespace, tag("."), entityTypeName)))));
 fn qualifiedEntityTypeName_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
-	// let (input, name) = recognize(tuple((namespace, tag("."), entityTypeName)))(input)?;
-	//FIXME recognize multiple namespaces with the caveat above
-	expr(map(namespace, |name| ExprKind::Cast(name.data, Rc::clone(child))))(input)
+    // let (input, name) = recognize(tuple((namespace, tag("."), entityTypeName)))(input)?;
+    //FIXME recognize multiple namespaces with the caveat above
+    expr(map(namespace, |name| {
+        ExprKind::Cast(name.data, Rc::clone(child))
+    }))(input)
 }
 //* qualifiedComplexTypeName    = namespace "." complexTypeName
 named!(qualifiedComplexTypeName<Input, Input>, call!(recognize(tuple((namespace, tag("."), complexTypeName)))));
@@ -2011,8 +2130,13 @@ named!(namespace<Input, Input>, call!(recognize(tuple((namespacePart, many0(tupl
 named!(namespacePart<Input, Input>, call!(recognize(odataIdentifier)));
 //*
 //* entitySetName       = odataIdentifier
-fn entitySetName_wip<'a>(input: Input<'a>, container: &'a schema::EntityContainer<'a>) -> IResult<Input<'a>, &'a schema::EntitySet<'a>> {
-	map_opt(recognize(odataIdentifier), |name| container.entity_sets.get(name.data))(input)
+fn entitySetName_wip<'a>(
+    input: Input<'a>,
+    container: &'a schema::EntityContainer<'a>,
+) -> IResult<Input<'a>, &'a schema::EntitySet<'a>> {
+    map_opt(recognize(odataIdentifier), |name| {
+        container.entity_sets.get(name.data)
+    })(input)
 }
 named!(entitySetName<Input, Input>, call!(recognize(odataIdentifier)));
 //* singletonEntity     = odataIdentifier
@@ -2238,47 +2362,47 @@ named!(primitiveLiteral<Input, Input>, call!(alt((
 						))
 					))));
 fn primitiveLiteral_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::Lit> {
-	alt((
-		alt((
-			// XXX make sure these are ordered in a away that eliminates ambiguity
-			// We could also make sure that the input passed to this function contains only one
-			// literal and then use the complete() combinator for all the cases bellow
-			nullValue_wip,
-			booleanValue_wip,
-			guidValue_wip,
-			dateTimeOffsetValue_wip,
-			dateValue_wip,
-			// timeOfDayValue_wip,
-			// decimalValue_wip,
-			// doubleValue_wip,
-			// singleValue_wip,
-			// sbyteValue_wip,
-			// byteValue_wip,
-			// int16Value_wip,
-			// int32Value_wip,
-			// int64Value_wip,
-			// string_wip,
-			// duration_wip,
-			// _enum_wip,
-		)),
-		alt((
-			value(ast::Lit::Unimplemented, binary),
-			value(ast::Lit::Unimplemented, geographyCollection),
-			value(ast::Lit::Unimplemented, geographyLineString),
-			value(ast::Lit::Unimplemented, geographyMultiLineString),
-			value(ast::Lit::Unimplemented, geographyMultiPoint),
-			value(ast::Lit::Unimplemented, geographyMultiPolygon),
-			value(ast::Lit::Unimplemented, geographyPoint),
-			value(ast::Lit::Unimplemented, geographyPolygon),
-			value(ast::Lit::Unimplemented, geometryCollection),
-			value(ast::Lit::Unimplemented, geometryLineString),
-			value(ast::Lit::Unimplemented, geometryMultiLineString),
-			value(ast::Lit::Unimplemented, geometryMultiPoint),
-			value(ast::Lit::Unimplemented, geometryMultiPolygon),
-			value(ast::Lit::Unimplemented, geometryPoint),
-			value(ast::Lit::Unimplemented, geometryPolygon),
-		))
-	))(input)
+    alt((
+        alt((
+            // XXX make sure these are ordered in a away that eliminates ambiguity
+            // We could also make sure that the input passed to this function contains only one
+            // literal and then use the complete() combinator for all the cases bellow
+            nullValue_wip,
+            booleanValue_wip,
+            guidValue_wip,
+            dateTimeOffsetValue_wip,
+            dateValue_wip,
+            // timeOfDayValue_wip,
+            // decimalValue_wip,
+            // doubleValue_wip,
+            // singleValue_wip,
+            // sbyteValue_wip,
+            // byteValue_wip,
+            // int16Value_wip,
+            // int32Value_wip,
+            // int64Value_wip,
+            // string_wip,
+            // duration_wip,
+            // _enum_wip,
+        )),
+        alt((
+            value(ast::Lit::Unimplemented, binary),
+            value(ast::Lit::Unimplemented, geographyCollection),
+            value(ast::Lit::Unimplemented, geographyLineString),
+            value(ast::Lit::Unimplemented, geographyMultiLineString),
+            value(ast::Lit::Unimplemented, geographyMultiPoint),
+            value(ast::Lit::Unimplemented, geographyMultiPolygon),
+            value(ast::Lit::Unimplemented, geographyPoint),
+            value(ast::Lit::Unimplemented, geographyPolygon),
+            value(ast::Lit::Unimplemented, geometryCollection),
+            value(ast::Lit::Unimplemented, geometryLineString),
+            value(ast::Lit::Unimplemented, geometryMultiLineString),
+            value(ast::Lit::Unimplemented, geometryMultiPoint),
+            value(ast::Lit::Unimplemented, geometryMultiPolygon),
+            value(ast::Lit::Unimplemented, geometryPoint),
+            value(ast::Lit::Unimplemented, geometryPolygon),
+        )),
+    ))(input)
 }
 //*
 //* ; in Atom and JSON message bodies and CSDL DefaultValue attributes
@@ -2341,14 +2465,21 @@ named!(primitiveValue<Input, Input>, call!(alt((
 //* nullValue = 'null'
 named!(nullValue<Input, Input>, call!(tag("null")));
 fn nullValue_wip(input: Input) -> IResult<Input, ast::Lit> {
-	value(ast::Lit::Null, tag("null"))(input)
+    value(ast::Lit::Null, tag("null"))(input)
 }
 //*
 //* ; base64url encoding according to http://tools.ietf.org/html/rfc4648#section-5
 //* binary      = "binary" SQUOTE binaryValue SQUOTE
 named!(binary<Input, Input>, call!(recognize(tuple((tag_no_case("binary"), SQUOTE, binaryValue, SQUOTE)))));
 fn binary_wip(input: Input) -> IResult<Input, ast::Lit> {
-	preceded(tag_no_case("binary"), delimited(SQUOTE, map(binaryValue, |b| ast::Lit::Binary(b.to_string())), SQUOTE))(input)
+    preceded(
+        tag_no_case("binary"),
+        delimited(
+            SQUOTE,
+            map(binaryValue, |b| ast::Lit::Binary(b.to_string())),
+            SQUOTE,
+        ),
+    )(input)
 }
 //* binaryValue = *(4base64char) [ base64b16  / base64b8 ]
 named!(binaryValue<Input, Input>, call!(recognize(tuple((many0(many_m_n(4, 4, base64char)), opt(alt((base64b16, base64b8))))))));
@@ -2362,10 +2493,10 @@ named!(base64char<Input, Input>, call!(alt((ALPHA, DIGIT, tag("-"), tag("_")))))
 //* booleanValue = "true" / "false"
 named!(booleanValue<Input, Input>, call!(alt((tag_no_case("true"), tag_no_case("false")))));
 fn booleanValue_wip(input: Input) -> IResult<Input, ast::Lit> {
-	alt((
-		value(ast::Lit::Boolean(true), tag_no_case("true")),
-		value(ast::Lit::Boolean(false), tag_no_case("false")),
-	))(input)
+    alt((
+        value(ast::Lit::Boolean(true), tag_no_case("true")),
+        value(ast::Lit::Boolean(false), tag_no_case("false")),
+    ))(input)
 }
 //*
 //* decimalValue = [ SIGN ] 1*DIGIT [ "." 1*DIGIT ] [ "e" [ SIGN ] 1*DIGIT ] / nanInfinity
@@ -2390,7 +2521,12 @@ named!(guidValue<Input, Input>, call!(recognize(tuple((many_m_n(8, 8, HEXDIG), t
 						many_m_n(12, 12, HEXDIG)
 						)))));
 fn guidValue_wip(input: Input) -> IResult<Input, ast::Lit> {
-	map(map_res(take(uuid::adapter::Hyphenated::LENGTH), |res: Input| Uuid::from_str(res.data)), ast::Lit::Guid)(input)
+    map(
+        map_res(take(uuid::adapter::Hyphenated::LENGTH), |res: Input| {
+            Uuid::from_str(res.data)
+        }),
+        ast::Lit::Guid,
+    )(input)
 }
 //*
 //* byteValue  = 1*3DIGIT           ; numbers in the range from 0 to 255
@@ -2413,8 +2549,9 @@ named!(SQUOTE_in_string<Input, Input>, call!(recognize(tuple((SQUOTE, SQUOTE))))
 //* dateValue = year "-" month "-" day
 named!(dateValue<Input, Input>, call!(recognize(tuple((year, tag("-"), month, tag("-"), day)))));
 fn dateValue_wip(input: Input) -> IResult<Input, ast::Lit> {
-	let (input, (year, _, month, _, day)) = tuple((year_wip, tag("-"), month_wip, tag("-"), day_wip))(input)?;
-	Ok((input, ast::Lit::Date(year, month, day)))
+    let (input, (year, _, month, _, day)) =
+        tuple((year_wip, tag("-"), month_wip, tag("-"), day_wip))(input)?;
+    Ok((input, ast::Lit::Date(year, month, day)))
 }
 //*
 //* dateTimeOffsetValue = year "-" month "-" day "T" hour ":" minute [ ":" second [ "." fractionalSeconds ] ] ( "Z" / SIGN hour ":" minute )
@@ -2423,11 +2560,15 @@ named!(dateTimeOffsetValue<Input, Input>, call!(recognize(tuple((year, tag("-"),
 							  alt((tag_no_case("Z"), recognize(tuple((SIGN, hour, tag(":"), minute)))))
 							  )))));
 fn dateTimeOffsetValue_wip(input: Input) -> IResult<Input, ast::Lit> {
-	let (input, (year, _, month, _, day)) = tuple((year_wip, tag("-"), month_wip, tag("-"), day_wip))(input)?;
-	let (input, (_, hour, _, minute)) = tuple((tag("T"), hour_wip, tag(":"), minute_wip))(input)?;
+    let (input, (year, _, month, _, day)) =
+        tuple((year_wip, tag("-"), month_wip, tag("-"), day_wip))(input)?;
+    let (input, (_, hour, _, minute)) = tuple((tag("T"), hour_wip, tag(":"), minute_wip))(input)?;
 
-	// FIXME correctly parse datetime offsets
-	Ok((input, ast::Lit::DateTimeOffset(year, month, day, hour, minute)))
+    // FIXME correctly parse datetime offsets
+    Ok((
+        input,
+        ast::Lit::DateTimeOffset(year, month, day, hour, minute),
+    ))
 }
 
 //*
@@ -2456,7 +2597,13 @@ named!(zeroToFiftyNine<Input, Input>, call!(recognize(tuple((one_of("012345"), D
 //* year  = [ "-" ] ( "0" 3DIGIT / oneToNine 3*DIGIT )
 named!(year<Input, Input>, call!(recognize(tuple((opt(tag("-")), alt((recognize(tuple((tag("0"), many_m_n(3, 3, DIGIT)))), recognize(tuple((oneToNine, many_m_n(3, 3, DIGIT)))))))))));
 fn year_wip(input: Input) -> IResult<Input, i16> {
-	map_res(recognize(tuple((opt(tag("-")), take_while_m_n(4, 4, |c: char| c.is_digit(10))))), |res: Input| i16::from_str(res.data))(input)
+    map_res(
+        recognize(tuple((
+            opt(tag("-")),
+            take_while_m_n(4, 4, |c: char| c.is_digit(10)),
+        ))),
+        |res: Input| i16::from_str(res.data),
+    )(input)
 }
 
 //* month = "0" oneToNine
@@ -2465,7 +2612,13 @@ named!(month<Input, Input>, call!(alt((  recognize(tuple((tag("0"), oneToNine)))
 			       , recognize(tuple((tag("1"), one_of("012"))))
 			       ))));
 fn month_wip(input: Input) -> IResult<Input, u8> {
-	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), |res: Input| u8::from_str(res.data)), |m| (1 <= *m && *m <= 12))(input)
+    verify(
+        map_res(
+            take_while_m_n(2, 2, |c: char| c.is_digit(10)),
+            |res: Input| u8::from_str(res.data),
+        ),
+        |m| (1 <= *m && *m <= 12),
+    )(input)
 }
 //* day   = "0" oneToNine
 //*       / ( "1" / "2" ) DIGIT
@@ -2475,7 +2628,13 @@ named!(day<Input, Input>, call!(alt((  recognize(tuple((tag("0"), oneToNine)))
 			     , recognize(tuple((tag("3"), one_of("01"))))
 			     ))));
 fn day_wip(input: Input) -> IResult<Input, u8> {
-	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), |res: Input| u8::from_str(res.data)), |m| (1 <= *m && *m <= 31))(input)
+    verify(
+        map_res(
+            take_while_m_n(2, 2, |c: char| c.is_digit(10)),
+            |res: Input| u8::from_str(res.data),
+        ),
+        |m| (1 <= *m && *m <= 31),
+    )(input)
 }
 //* hour   = ( "0" / "1" ) DIGIT
 //*        / "2" ( "0" / "1" / "2" / "3" )
@@ -2483,17 +2642,35 @@ named!(hour<Input, Input>, call!(alt((  recognize(tuple((one_of("01"), DIGIT)))
 			      , recognize(tuple((tag("2"), one_of("0123"))))
 			      ))));
 fn hour_wip(input: Input) -> IResult<Input, u8> {
-	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), |res: Input| u8::from_str(res.data)), |m| *m <= 23)(input)
+    verify(
+        map_res(
+            take_while_m_n(2, 2, |c: char| c.is_digit(10)),
+            |res: Input| u8::from_str(res.data),
+        ),
+        |m| *m <= 23,
+    )(input)
 }
 //* minute = zeroToFiftyNine
 named!(minute<Input, Input>, call!(recognize(zeroToFiftyNine)));
 fn minute_wip(input: Input) -> IResult<Input, u8> {
-	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), |res: Input| u8::from_str(res.data)), |m| *m <= 59)(input)
+    verify(
+        map_res(
+            take_while_m_n(2, 2, |c: char| c.is_digit(10)),
+            |res: Input| u8::from_str(res.data),
+        ),
+        |m| *m <= 59,
+    )(input)
 }
 //* second = zeroToFiftyNine
 named!(second<Input, Input>, call!(recognize(zeroToFiftyNine)));
 fn second_wip(input: Input) -> IResult<Input, u8> {
-	verify(map_res(take_while_m_n(2, 2, |c: char| c.is_digit(10)), |res: Input| u8::from_str(res.data)), |m| *m <= 59)(input)
+    verify(
+        map_res(
+            take_while_m_n(2, 2, |c: char| c.is_digit(10)),
+            |res: Input| u8::from_str(res.data),
+        ),
+        |m| *m <= 59,
+    )(input)
 }
 //* fractionalSeconds = 1*12DIGIT
 named!(fractionalSeconds<Input, Input>, call!(recognize(many_m_n(1, 12, DIGIT))));
@@ -2506,7 +2683,6 @@ named!(enumValue<Input, Input>, call!(recognize(tuple((singleEnumValue, many0(tu
 named!(singleEnumValue<Input, Input>, call!(alt((enumerationMember, enumMemberValue))));
 //* enumMemberValue = int64Value
 named!(enumMemberValue<Input, Input>, call!(recognize(int64Value)));
-
 
 //* geographyCollection   = geographyPrefix SQUOTE fullCollectionLiteral SQUOTE
 named!(geographyCollection<Input, Input>, call!(recognize(tuple((geographyPrefix, SQUOTE, fullCollectionLiteral, SQUOTE)))));
@@ -2884,7 +3060,7 @@ named!(HEXDIG<Input, Input>, call!(recognize(verify(anychar, |chr: &char| chr.is
 
 //* A-to-F = "A" / "B" / "C" / "D" / "E" / "F"
 fn is_A_to_F(chr: u8) -> bool {
-	(chr >= 0x41 && chr <= 0x46) || (chr >= 0x61 && chr <= 0x66)
+    (chr >= 0x41 && chr <= 0x46) || (chr >= 0x61 && chr <= 0x66)
 }
 named!(A_to_F<Input, Input>, call!(recognize(verify(anychar, |chr: &char| chr.is_ascii() && is_A_to_F(*chr as u8)))));
 
