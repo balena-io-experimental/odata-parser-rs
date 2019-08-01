@@ -50,9 +50,9 @@ pub struct ResourcePath<'a> {
 // }
 //
 // pub enum OutputKind<'a> {
-// 	Entity(&'a schema::kind::Entity),
-// 	Complex(&'a schema::kind::Complex),
-// 	Primitive(&'a schema::kind::Primitive),
+// 	Entity(&'a schema::ty::Entity),
+// 	Complex(&'a schema::ty::Complex),
+// 	Primitive(&'a schema::ty::Primitive),
 // 	Collection(&'a OutputKind)
 // }
 //
@@ -97,7 +97,7 @@ pub struct ResourcePath<'a> {
 
 #[derive(Debug,Clone)]
 pub enum PathSegment<'a> {
-	EntitySet(&'a schema::EntitySet),             // -> collectionNavigation
+	EntitySet(&'a schema::EntitySet<'a>),             // -> collectionNavigation
 	Singleton,                                    // -> singleNavigation
 	Action,                                       // -> ()
 	Function,                                     // -> collection,single,complexCollection,complex,primitiveCollection,primitive,() navigation
@@ -109,7 +109,7 @@ pub enum PathSegment<'a> {
 	Each,                                         // -> boundOperation
 	Filter(ParameterAlias<'a>),                   // -> collectionNavigation
 	KeyPredicate(KeyPredicate<'a>),               // -> singleNavigation
-	Property(&'a schema::property::Property),     // -> single,collection,complexCollection,complex,primitiveCollection,primitive,boundOperation
+	Property(&'a schema::property::Property<'a>),     // -> single,collection,complexCollection,complex,primitiveCollection,primitive,boundOperation
 	Ref,                                          // -> ()
 	Value,
 	OrdinalIndex(i64),
@@ -122,7 +122,7 @@ pub struct KeyPredicate<'a> {
 
 #[derive(Debug,Clone)]
 pub struct KeyProperty<'a> {
-	pub property: &'a schema::property::Property,
+	pub property: &'a schema::property::Property<'a>,
 	pub value: KeyValue<'a>,
 }
 
@@ -134,7 +134,7 @@ pub enum KeyValue<'a> {
 
 #[derive(Debug,Clone)]
 pub struct PrimitiveValue<'a> {
-	kind: schema::kind::Primitive,
+	kind: schema::ty::Primitive,
 	value: &'a str,
 }
 
@@ -327,7 +327,7 @@ pub enum ExprKind<'a> {
 	Root,
 	// JSON,
 	// Member,
-	EntitySet(&'a schema::EntitySet),
+	EntitySet(&'a schema::EntitySet<'a>),
 	Var(Rc<Expr<'a>>),
 	Placeholder,
 	Unimplemented,
@@ -340,7 +340,7 @@ pub enum ExprKind<'a> {
 	Count(Rc<Expr<'a>>),
 	Each(Rc<Expr<'a>>),
 	Key(Rc<Expr<'a>>, Rc<Expr<'a>>),
-	Property(&'a schema::property::Property),
+	Property(&'a schema::property::Property<'a>),
 	Ref(Rc<Expr<'a>>),
 	Value,
 	OrdinalIndex(Rc<Expr<'a>>, i64),
@@ -359,7 +359,7 @@ impl<'a, 'b> ExprKind<'a> {
 			ExprKind::MethodCall(method, args) => unimplemented!(),
 			ExprKind::Filter(collection, predicate) => collection.ty,
 			ExprKind::Root => unimplemented!(),
-			ExprKind::EntitySet(entity_set) => ty::Collection::Entity(&entity_set.kind).into(),
+			ExprKind::EntitySet(entity_set) => ty::Collection::Entity(&entity_set.ty).into(),
 			ExprKind::Var(expr) => expr.node.to_ty(),
 			ExprKind::Placeholder => unimplemented!(),
 			ExprKind::Unimplemented => ty::Ty::None,
@@ -389,10 +389,10 @@ pub struct Options<'a> {
 //#[derive(Debug,Clone)]
 //pub enum Ty<'a> {
 //	None,
-//	Primitive(schema::kind::Primitive),
-//	Enumeration(&'a schema::kind::Enumeration),
-//	Complex(&'a schema::kind::Complex),
-//	Entity(&'a schema::kind::Entity),
+//	Primitive(schema::ty::Primitive),
+//	Enumeration(&'a schema::ty::Enumeration),
+//	Complex(&'a schema::ty::Complex),
+//	Entity(&'a schema::ty::Entity),
 //	Function,
 //	Collection(Rc<Ty<'a>>),
 //}
@@ -413,10 +413,10 @@ pub mod ty {
 		Collection(Collection<'a>),
 	}
 
-	pub type Primitive = schema::kind::Primitive;
-	pub type Enumeration<'a> = &'a schema::kind::Enumeration;
-	pub type Complex<'a> = &'a schema::kind::Complex;
-	pub type Entity<'a> = &'a schema::kind::Entity;
+	pub type Primitive = schema::ty::Primitive;
+	pub type Enumeration<'a> = &'a schema::ty::Enum<'a>;
+	pub type Complex<'a> = &'a schema::ty::Complex<'a>;
+	pub type Entity<'a> = &'a schema::ty::Entity<'a>;
 
 	#[derive(Debug,Copy,Clone)]
 	pub enum Collection<'a> {
@@ -446,8 +446,8 @@ pub mod ty {
 			Ty::Enumeration(ty)
 		}
 	}
-	impl From<Primitive> for Ty<'_> {
-		fn from(ty: Primitive) -> Ty<'static> {
+	impl<'a> From<Primitive> for Ty<'a> {
+		fn from(ty: Primitive) -> Ty<'a> {
 			Ty::Primitive(ty)
 		}
 	}

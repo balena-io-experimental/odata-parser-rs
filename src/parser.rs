@@ -282,14 +282,14 @@ struct Scope<'a> {
 	vars: RefCell<Vec<Vec<(String, (ast::NodeId, ast::Ty<'a>))>>>
 }
 
-impl Scope<'_> {
+impl<'a> Scope<'a> {
 	fn new() -> Self {
 		Scope{
 			vars: RefCell::new(vec![]),
 		}
 	}
 
-	fn resolve(&self, name: &str) -> Option<(ast::NodeId, ast::Ty)> {
+	fn resolve(&self, name: &'a str) -> Option<(ast::NodeId, ast::Ty<'a>)> {
 		self.vars.borrow()
 			.iter()
 			.rev()
@@ -316,14 +316,14 @@ impl Scope<'_> {
 
 #[derive(Debug)]
 pub struct Parser<'a> {
-	document: &'a schema::Document,
+	document: &'a schema::Document<'a>,
 	next_node_id: Cell<ast::NodeId>,
 	scope: Scope<'a>,
 	// bound_vars: RefCell<HashMap<Identifier, (Type, Option<Value>>>,
 }
 
 impl<'a, 'b> Parser<'a> {
-	pub fn new(document: &'a schema::Document) -> Self {
+	pub fn new(document: &'a schema::Document<'a>) -> Self {
 		Parser{
 			document: document,
 			next_node_id: Cell::new(1),
@@ -356,7 +356,7 @@ impl<'a, 'b> Parser<'a> {
 	}
 }
 
-pub fn odataUri<'a>(input: Input<'a>, document: &'a schema::Document) -> IResult<Input<'a>, ast::ODataURI<'a>> {
+pub fn odataUri<'a>(input: Input<'a>, document: &'a schema::Document<'a>) -> IResult<Input<'a>, ast::ODataURI<'a>> {
 	// src: http://docs.oasis-open.org/odata/odata/v4.01/cs01/part2-url-conventions/odata-v4.01-cs01-part2-url-conventions.html#sec_URLComponents
 	// Mandated and suggested content of these three significant URL components used by an OData
 	// service are covered in sequence in the three following chapters.  OData follows the URI
@@ -375,7 +375,7 @@ pub fn odataUri<'a>(input: Input<'a>, document: &'a schema::Document) -> IResult
 	// ·       Interpret path segments, query option names, and query option values according to OData rules
 
 	let (input, service_root) = serviceRoot(input, &document.service_root)?;
-	let (input, relative_uri) = opt(|i| odataRelativeUri(i, &document.schema))(input)?;
+	let (input, relative_uri) = opt(|i| odataRelativeUri(i, &document))(input)?;
 
 	Ok((input, ast::ODataURI{service_root: service_root.data, relative_uri}))
 }
@@ -395,7 +395,7 @@ fn serviceRoot<'a>(input: Input<'a>, service_root: &'a str) -> IResult<Input<'a>
 //*                  / '$entity' "/" qualifiedEntityTypeName "?" entityCastOptions
 //*                  / '$metadata' [ "?" metadataOptions ] [ context ]
 //*                  / resourcePath [ "?" queryOptions ]
-fn odataRelativeUri<'a>(input: Input<'a>, schema: &'a schema::Schema)-> IResult<Input<'a>, ast::RelativeURI<'a>> {
+fn odataRelativeUri<'a>(input: Input<'a>, doc: &'a schema::Document<'a>)-> IResult<Input<'a>, ast::RelativeURI<'a>> {
 	let (path, input) = input.split_at(input.data.find('?').unwrap_or(input.len()));
 	let (query, fragment) = input.split_at(input.data.find('#').unwrap_or(input.len()));
 	//FIXME we should split and decode path here isntead of parsing it as a string
@@ -409,7 +409,7 @@ fn odataRelativeUri<'a>(input: Input<'a>, schema: &'a schema::Schema)-> IResult<
 		|input: Input<'a>| {
 			// FIXME fully computing the resourcePath expression needs the parameter aliases
 			// FIXME we have to ensure that the full path was consumed
-			let (input, resource) = all_consuming(|i| resourcePath(i, schema.get_entity_container()))(path.clone())?;
+			let (input, resource) = all_consuming(|i| resourcePath(i, &doc.entity_container))(path.clone())?;
 
 			// let kind = ast::kind::PathKind::Single(ast::kind::Kind::Entity())
 			let (input, options) = opt(preceded(tag("?"), |i| queryOptions_wip(i)))(query.clone())?;
@@ -436,7 +436,7 @@ fn odataRelativeUri<'a>(input: Input<'a>, schema: &'a schema::Schema)-> IResult<
 //*              / functionImportCallNoParens
 //*              / crossjoin
 //*              / '$all'                         [ "/" qualifiedEntityTypeName ]
-fn resourcePath<'a>(input: Input<'a>, entity_container: &'a schema::EntityContainer) -> ExprOutput<'a> {
+fn resourcePath<'a>(input: Input<'a>, entity_container: &'a schema::EntityContainer<'a>) -> ExprOutput<'a> {
 	return alt((
 		|i| {
 			let (i, entity_set) = expr(map(|i| entitySetName_wip(i, entity_container), ExprKind::EntitySet))(i)?;
@@ -606,11 +606,11 @@ named!(singleNavigation<Input, Input>, call!(recognize(tuple((opt(tuple((tag("/"
 														   , _ref
 														   , _value
 														   ))))))));
-fn singleNavigation_wip<'a>(input: Input<'a>, kind: &'a schema::kind::Entity) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
+fn singleNavigation_wip<'a>(input: Input<'a>, kind: &'a schema::ty::Entity<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
 	//FIXME
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedEntityTypeName)))(input)?;
 	let (input, path) = opt(alt((
-		preceded(tag("/"), |i| propertyPath_wip(i, &kind.properties)),
+		preceded(tag("/"), |i| propertyPath_wip(i, &kind.structural_props, &kind.navigation_props)),
 		|i| boundOperation_wip(i),
 		map(_ref_wip, |s| vec![s]),
 		map(_value_wip, |s| vec![s]),
@@ -642,30 +642,32 @@ named!(propertyPath<Input, Input>, call!(recognize(alt((tuple((entityColNavigati
 						 , tuple((primitiveProperty, opt(primitivePath)))
 						 , tuple((streamProperty, opt(boundOperation)))
 						 )))));
-fn propertyPath_wip<'a>(input: Input<'a>, properties: &'a HashMap<schema::Identifier, schema::property::Property>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
-	use schema::kind;
-	use schema::property::*;
+fn propertyPath_wip<'a>(input: Input<'a>, structural: &'a HashMap<schema::Identifier, schema::property::Structural<'a>>, navigation: &'a HashMap<schema::Identifier, schema::property::Navigation<'a>>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
+	unimplemented!();
+	// use schema::ty;
+	// use schema::ty::Ty;
+	// use schema::property::*;
 
-	let (input, property) = map_opt(odataIdentifier, |name| properties.get(name.data))(input)?;
+	// let (input, property) = map_opt(odataIdentifier, |name| properties.get(name.data))(input)?;
 
-	let (input, path) = match property {
-		Property::Navigation(Navigation{kind, collection: true, ..}) => unimplemented!(), //opt(|i| collectionNavigation_wip(i, kind))(input)?,
-		Property::Navigation(Navigation{kind, collection: false, ..}) => opt(|i| singleNavigation_wip(i, kind))(input)?,
-		Property::Structural(Structural{kind: Type::Complex(kind), collection: true, ..}) => opt(|i| complexColPath_wip(i, kind))(input)?,
-		Property::Structural(Structural{kind: Type::Complex(kind), collection: false, ..}) => opt(|i| complexPath_wip(i, kind))(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(kind::Primitive::Stream), ..}) => opt(|i| boundOperation_wip(i))(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i))(input)?,
-		Property::Structural(Structural{kind: Type::Primitive(_), collection: false, ..}) => opt(|i| primitivePath_wip(i))(input)?,
-		Property::Structural(Structural{kind: Type::Enumeration(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i))(input)?,
-		Property::Structural(Structural{kind: Type::Enumeration(_), collection: false, ..}) => opt(|i| primitivePath_wip(i))(input)?,
-	};
+	// let (input, path) = match property.borrow() {
+	// 	PropertyRef::Navigation(Navigation{ty, collection: true, ..}) => unimplemented!(), //opt(|i| collectionNavigation_wip(i, kind))(input)?,
+	// 	PropertyRef::Navigation(Navigation{ty, collection: false, ..}) => opt(|i| singleNavigation_wip(i, ty))(input)?,
+	// 	PropertyRef::Structural(Structural{ty: Ty::Complex(kind), collection: true, ..}) => opt(|i| complexColPath_wip(i, &kind))(input)?,
+	// 	PropertyRef::Structural(Structural{ty: Ty::Complex(kind), collection: false, ..}) => opt(|i| complexPath_wip(i, &kind))(input)?,
+	// 	PropertyRef::Structural(Structural{ty: Ty::Primitive(ty::Primitive::Stream), ..}) => opt(|i| boundOperation_wip(i))(input)?,
+	// 	PropertyRef::Structural(Structural{ty: Ty::Primitive(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i))(input)?,
+	// 	PropertyRef::Structural(Structural{ty: Ty::Primitive(_), collection: false, ..}) => opt(|i| primitivePath_wip(i))(input)?,
+	// 	PropertyRef::Structural(Structural{ty: Ty::Enum(_), collection: true, ..}) => opt(|i| primitiveColPath_wip(i))(input)?,
+	// 	PropertyRef::Structural(Structural{ty: Ty::Enum(_), collection: false, ..}) => opt(|i| primitivePath_wip(i))(input)?,
+	// };
 
-	let mut result = vec![ast::PathSegment::Property(property)];
-	if let Some(mut path) = path {
-		result.append(&mut path);
-	}
+	// let mut result = vec![ast::PathSegment::Property(property)];
+	// if let Some(mut path) = path {
+	// 	result.append(&mut path);
+	// }
 
-	Ok((input, result))
+	// Ok((input, result))
 }
 
 //*
@@ -694,7 +696,7 @@ fn primitivePath_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathSe
 //  errata: The ABNF doesn't allow selecting a specific element and then continuing with a complexPath
 //  rule. Is this a mistake?
 named!(complexColPath<Input, Input>, call!(alt((ordinalIndex, recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((count, boundOperation))))))))));
-fn complexColPath_wip<'a>(input: Input<'a>, kind: &'a schema::kind::Complex) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
+fn complexColPath_wip<'a>(input: Input<'a>, kind: &'a schema::ty::Complex) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
 	alt((
 		map(|i| ordinalIndex_wip(i), |index| vec![index]),
 		|input| {
@@ -718,10 +720,10 @@ fn complexColPath_wip<'a>(input: Input<'a>, kind: &'a schema::kind::Complex) -> 
 //*                  / boundOperation
 //*                  ]
 named!(complexPath<Input, Input>, call!(recognize(tuple((opt(tuple((tag("/"), qualifiedComplexTypeName))), opt(alt((recognize(tuple((tag("/"), propertyPath))), boundOperation))))))));
-fn complexPath_wip<'a>(input: Input<'a>, kind: &'a schema::kind::Complex) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
+fn complexPath_wip<'a>(input: Input<'a>, kind: &'a schema::ty::Complex<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
 	let (input, cast) = opt(value(ast::PathSegment::Cast, preceded(tag("/"), qualifiedComplexTypeName)))(input)?;
 	let (input, path) = opt(alt((
-		preceded(tag("/"), |i| propertyPath_wip(i, &kind.properties)),
+		preceded(tag("/"), |i| propertyPath_wip(i, &kind.structural_props, &kind.navigation_props)),
 		|i| boundOperation_wip(i),
 	)))(input)?;
 
@@ -2009,13 +2011,8 @@ named!(namespace<Input, Input>, call!(recognize(tuple((namespacePart, many0(tupl
 named!(namespacePart<Input, Input>, call!(recognize(odataIdentifier)));
 //*
 //* entitySetName       = odataIdentifier
-fn entitySetName_wip<'a>(input: Input<'a>, container: &'a schema::EntityContainer) -> IResult<Input<'a>, &'a schema::EntitySet> {
-	map_opt(recognize(odataIdentifier), |name| {
-		if let Some(schema::EntityContainerMember::EntitySet(member)) = container.members.get(name.data) {
-			return Some(member);
-		}
-		return None;
-	})(input)
+fn entitySetName_wip<'a>(input: Input<'a>, container: &'a schema::EntityContainer<'a>) -> IResult<Input<'a>, &'a schema::EntitySet<'a>> {
+	map_opt(recognize(odataIdentifier), |name| container.entity_sets.get(name.data))(input)
 }
 named!(entitySetName<Input, Input>, call!(recognize(odataIdentifier)));
 //* singletonEntity     = odataIdentifier
