@@ -54,7 +54,6 @@ use std::ops::RangeTo;
 pub struct Input<'a> {
     parser: &'a Parser<'a>,
     data: &'a str,
-    ty: ast::Ty<'a>,
 }
 
 impl nom::UnspecializedInput for Input<'_> {}
@@ -73,12 +72,10 @@ impl Input<'_> {
         let a = Self {
             parser: self.parser,
             data: a,
-            ty: self.ty,
         };
         let b = Self {
             parser: self.parser,
             data: b,
-            ty: self.ty,
         };
         (a, b)
     }
@@ -88,7 +85,6 @@ impl InputTake for Input<'_> {
         Self {
             parser: self.parser,
             data: InputTake::take(&self.data, count),
-            ty: self.ty,
         }
     }
     fn take_split(&self, count: usize) -> (Self, Self) {
@@ -97,12 +93,10 @@ impl InputTake for Input<'_> {
             Self {
                 parser: self.parser,
                 data: a,
-                ty: self.ty,
             },
             Self {
                 parser: self.parser,
                 data: b,
-                ty: self.ty,
             },
         )
     }
@@ -143,7 +137,6 @@ impl Slice<std::ops::RangeTo<usize>> for Input<'_> {
         Self {
             parser: self.parser,
             data: Slice::slice(&self.data, range),
-            ty: self.ty,
         }
     }
 }
@@ -153,7 +146,6 @@ impl Slice<std::ops::RangeFrom<usize>> for Input<'_> {
         Self {
             parser: self.parser,
             data: Slice::slice(&self.data, range),
-            ty: self.ty,
         }
     }
 }
@@ -346,7 +338,6 @@ impl<'a, 'b> Parser<'a> {
         let input = Input {
             parser: self,
             data: input,
-            ty: ast::Ty::None,
         };
 
         odataUri(input, self.document)
@@ -2105,23 +2096,41 @@ named!(qualifiedTypeName<Input, Input>, call!(alt((singleQualifiedTypeName
 					   , recognize(tuple((tag("Collection"), OPEN, singleQualifiedTypeName, CLOSE)))))));
 //*
 //* qualifiedEntityTypeName     = namespace "." entityTypeName
-//XXX if an entity type name is also declared as a namespace the namespace parser will consume all
-//input leaving nothing for entityTypeName. Since nom doesn't understand that the child parser has
-//a many0 underneath this will fail to backtrack like a regexp would
 named!(qualifiedEntityTypeName<Input, Input>, call!(recognize(tuple((namespace, tag("."), entityTypeName)))));
 fn qualifiedEntityTypeName_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
-    // let (input, name) = recognize(tuple((namespace, tag("."), entityTypeName)))(input)?;
-    //FIXME recognize multiple namespaces with the caveat above
-    expr(map(namespace, |name| {
-        ExprKind::Cast(name.data, Rc::clone(child))
-    }))(input)
+    let (input, (namespace, entity)) = namespaced_item(input)?;
+
+    input.parser.document.schemas
+        .get(namespace)
+        .and_then(|s| s.entity_types.get(entity))
+        .map(|e| (input.clone(), Rc::new(input.parser.expr(ExprKind::Cast(&e, Rc::clone(child))))))
+        .ok_or(Err::Error((input.clone(), ErrorKind::Verify)))
 }
+
 //* qualifiedComplexTypeName    = namespace "." complexTypeName
 named!(qualifiedComplexTypeName<Input, Input>, call!(recognize(tuple((namespace, tag("."), complexTypeName)))));
 //* qualifiedTypeDefinitionName = namespace "." typeDefinitionName
 named!(qualifiedTypeDefinitionName<Input, Input>, call!(recognize(tuple((namespace, tag("."), typeDefinitionName)))));
 //* qualifiedEnumTypeName       = namespace "." enumerationTypeName
 named!(qualifiedEnumTypeName<Input, Input>, call!(recognize(tuple((namespace, tag("."), enumerationTypeName)))));
+
+/// Utility function to help with namespace rules that would normally require lookahead to do
+/// properly
+fn namespaced_item<'a>(input: Input<'a>) -> IResult<Input<'a>, (&'a str, &'a str)> {
+    let input2 = input.clone();
+
+    let (mut input, (_, mut sep,  mut item)) = tuple((odataIdentifier, tag("."), odataIdentifier))(input)?;
+
+    while let Ok((i, (s, it))) = tuple((tag("."), odataIdentifier))(input.clone()) {
+        input = i;
+        sep = s;
+        item = it;
+    }
+
+    let namespace = input2.slice(..input2.offset(&sep));
+
+    Ok((input, (namespace.data, item.data)))
+}
 //*
 //* ; an alias is just a single-part namespace
 //* namespace     = namespacePart *( "." namespacePart )

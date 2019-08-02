@@ -57,6 +57,13 @@ impl<'a> Document<'a> {
                     property.ty.link(self);
                 }
             }
+            for entity_container in schema.entity_containers.values() {
+                entity_container.parent.link(&schema);
+                for entity_set in entity_container.entity_sets.values() {
+                    entity_set.parent.link(&entity_container);
+                    entity_set.ty.link(self);
+                }
+            }
         }
     }
 }

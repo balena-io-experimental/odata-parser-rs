@@ -303,12 +303,21 @@ pub struct Filter<'a> {
 
 pub type NodeId = u32;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Expr<'a> {
     pub id: NodeId,
     // The AST node of the expression
     pub node: ExprKind<'a>,
     pub ty: Ty<'a>,
+}
+
+impl std::fmt::Debug for Expr<'_> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.debug_struct("Expr")
+            .field("id", &self.id)
+            .field("node", &self.node)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -318,7 +327,7 @@ pub enum ExprKind<'a> {
     Binary(BinOp, Rc<Expr<'a>>, Rc<Expr<'a>>),
     Unary(UnOp, Rc<Expr<'a>>),
     List(Vec<Rc<Expr<'a>>>),
-    Cast(&'a str, Rc<Expr<'a>>),
+    Cast(&'a schema::ty::Entity<'a>, Rc<Expr<'a>>),
     // IsOf,
     MethodCall(Method, Vec<Rc<Expr<'a>>>),
     // EntitySet(&'a schema::EntitySet, Rc<Options>),
@@ -354,7 +363,13 @@ impl<'a, 'b> ExprKind<'a> {
             ExprKind::Binary(op, lhs, rhs) => unimplemented!(),
             ExprKind::Unary(op, arg) => unimplemented!(),
             ExprKind::List(xs) => unimplemented!(),
-            ExprKind::Cast(ty, expr) => unimplemented!(),
+            ExprKind::Cast(ty, expr) => {
+                //FIXME
+                ty::Ty::Entity(ty)
+                // match expr.ty {
+                //     ty::Ty::Entity(ty)
+                // }
+            },
             ExprKind::MethodCall(method, args) => unimplemented!(),
             ExprKind::Filter(collection, predicate) => collection.ty,
             ExprKind::Root => unimplemented!(),

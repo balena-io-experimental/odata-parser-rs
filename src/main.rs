@@ -15,9 +15,10 @@ use schema::ty::*;
 use schema::{Document, EntityContainer, EntityContainerPath, EntitySet, Schema};
 
 fn main() {
-    let namespace = "com.balena-cloud.api".to_string();
+    let namespace = "com.balena_cloud.api".to_string();
 
     let doc = Document {
+        service_root: "http://example.com/foobar/".into(),
         entity_container: DerefCell::with_state(EntityContainerPath(
             namespace.clone(),
             "balena".to_string(),
@@ -63,6 +64,10 @@ fn main() {
                 name: "balena".into(),
                 entity_sets: map(&[EntitySet {
                     name: "applications".into(),
+                    ty: DerefCell::with_state(EntityPath(
+                        namespace.clone(),
+                        "application".to_string(),
+                    )),
                     ..EntitySet::default()
                 }]),
                 ..EntityContainer::default()
@@ -78,7 +83,7 @@ fn main() {
     // // println!("{:?}", parser::odataRelativeUri("ProductsByComplex(complex=@c)?@c={\"@odata.type\":\"doc.Customer\",\"Name\":\"Value\"}\n"));
     // // println!("{:#?}", p.parse("https://example.com/foobar/users/$filter=@foo/$filter=@bar/$count?$filter=true eq true"));
     let (_, tree) = p
-        .parse("https://example.com/foobar/applications/$filter=@a/$filter=@b")
+        .parse("http://example.com/foobar/applications/$filter=@a/com.balena_cloud.api.user")
         .unwrap();
 
     println!("{:#?}", tree);
