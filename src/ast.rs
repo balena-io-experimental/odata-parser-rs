@@ -25,13 +25,7 @@ pub enum RelativeURI<'a> {
     Batch(Option<Vec<QueryOption<'a>>>),
     Entity,
     Metadata,
-    Resource(ResourcePath<'a>),
-}
-
-#[derive(Debug, Clone)]
-pub struct ResourcePath<'a> {
-    pub resource: Rc<Expr<'a>>,
-    pub options: Option<Vec<QueryOption<'a>>>,
+    Resource(ResourceQuery<'a>),
 }
 
 // pub struct Output<'a>(OutputCardinality, OutputKind<'a>);
@@ -337,7 +331,7 @@ pub enum ExprKind<'a> {
     // JSON,
     // Member,
     EntitySet(&'a schema::EntitySet<'a>),
-    Var(Rc<Expr<'a>>),
+    Var(NodeId, Ty<'a>),
     Placeholder,
     Unimplemented,
     // stuff from path segment
@@ -353,14 +347,33 @@ pub enum ExprKind<'a> {
     Ref(Rc<Expr<'a>>),
     Value,
     OrdinalIndex(Rc<Expr<'a>>, i64),
+    Query(Rc<QueryExpr<'a>>),
 }
 
 impl<'a, 'b> ExprKind<'a> {
     pub fn to_ty(&'b self) -> Ty<'a> {
         match &self {
             ExprKind::Call(a, b) => unimplemented!(),
-            ExprKind::Lit(l) => unimplemented!(),
-            ExprKind::Binary(op, lhs, rhs) => unimplemented!(),
+            ExprKind::Lit(l) => {
+                match l {
+                    Lit::Null => ty::Ty::Null,
+                    Lit::Binary(_) => ty::Ty::Primitive(schema::ty::Primitive::Binary),
+                    Lit::Boolean(_) => ty::Ty::Primitive(schema::ty::Primitive::Boolean),
+                    Lit::Date(_, _, _) => ty::Ty::Primitive(schema::ty::Primitive::Date),
+                    Lit::DateTimeOffset(_, _, _, _, _) => ty::Ty::Primitive(schema::ty::Primitive::DateTimeOffset),
+                    Lit::Decimal => ty::Ty::Primitive(schema::ty::Primitive::Decimal),
+                    Lit::Duration => ty::Ty::Primitive(schema::ty::Primitive::Duration),
+                    Lit::Guid(_) => ty::Ty::Primitive(schema::ty::Primitive::Guid),
+                    Lit::Str(_) => ty::Ty::Primitive(schema::ty::Primitive::String),
+                    // FIXME create types for the rest of the literals
+                    _ => ty::Ty::None,
+                }
+            },
+            ExprKind::Binary(op, lhs, rhs) => {
+                //FIXME the rules for binary operators are more complex than this simplification
+                //http://docs.oasis-open.org/odata/odata/v4.01/cs01/part2-url-conventions/odata-v4.01-cs01-part2-url-conventions.html#sec_LogicalOperators
+                lhs.node.to_ty()
+            },
             ExprKind::Unary(op, arg) => unimplemented!(),
             ExprKind::List(xs) => unimplemented!(),
             ExprKind::Cast(ty, expr) => {
@@ -374,7 +387,7 @@ impl<'a, 'b> ExprKind<'a> {
             ExprKind::Filter(collection, predicate) => collection.ty,
             ExprKind::Root => unimplemented!(),
             ExprKind::EntitySet(entity_set) => ty::Collection::Entity(&entity_set.ty).into(),
-            ExprKind::Var(expr) => expr.node.to_ty(),
+            ExprKind::Var(_, ty) => *ty,
             ExprKind::Placeholder => unimplemented!(),
             ExprKind::Unimplemented => ty::Ty::None,
             ExprKind::Singleton => unimplemented!(),
@@ -389,15 +402,69 @@ impl<'a, 'b> ExprKind<'a> {
             ExprKind::Ref(_) => unimplemented!(),
             ExprKind::Value => unimplemented!(),
             ExprKind::OrdinalIndex(collection, _) => unimplemented!(),
+            ExprKind::Query(q) => q.resource.node.to_ty(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct Options<'a> {
-    pub filter: Option<Expr<'a>>,
-    pub select: Option<Expr<'a>>,
-    pub compute: Option<Expr<'a>>,
+pub struct QueryExpr<'a> {
+    pub resource: Rc<Expr<'a>>,
+    pub select: Vec<Rc<QueryExpr<'a>>>,
+    pub expand: Vec<Rc<QueryExpr<'a>>>,
+    pub filter: Option<Rc<Expr<'a>>>,
+    pub search: Option<Rc<Expr<'a>>>,
+    pub orderby: Vec<Rc<Expr<'a>>>,
+    pub skip: Option<u32>,
+    pub top: Option<u32>,
+    pub inlinecount: bool,
+    pub levels: Option<u32>,
+    pub compute: Vec<Rc<Expr<'a>>>,
+    pub params: Vec<Rc<Expr<'a>>>,
+}
+
+impl<'a> QueryExpr<'a> {
+    pub fn new(expr: Rc<Expr<'a>>) -> Self {
+        Self {
+            resource: expr.clone(),
+            select: vec![],
+            expand: vec![],
+            filter: None,
+            search: None,
+            orderby: vec![],
+            skip: None,
+            top: None,
+            inlinecount: false,
+            levels: None,
+            compute: vec![],
+            params: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceQuery<'a> {
+    pub expr: QueryExpr<'a>,
+    pub deltatoken: Option<String>,
+    pub format: Option<String>,
+    pub id: Option<String>,
+    pub schemaversion: Option<String>,
+    pub skiptoken: Option<String>,
+    pub index: Option<u32>,
+}
+
+impl<'a> ResourceQuery<'a> {
+    pub fn new(expr: Rc<Expr<'a>>) -> Self {
+        Self {
+            expr: QueryExpr::new(expr),
+            id: None,
+            deltatoken: None,
+            format: None,
+            schemaversion: None,
+            skiptoken: None,
+            index: None,
+        }
+    }
 }
 
 //#[derive(Debug,Clone)]
@@ -419,6 +486,7 @@ pub mod ty {
     #[derive(Debug, Copy, Clone)]
     pub enum Ty<'a> {
         None,
+        Null,
         Primitive(Primitive),
         Enumeration(Enumeration<'a>),
         Complex(Complex<'a>),

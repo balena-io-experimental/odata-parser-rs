@@ -41,7 +41,7 @@ impl<'a> Document<'a> {
             for entity_type in schema.entity_types.values() {
                 entity_type.parent.link(&schema);
                 if let Some(key) = &entity_type.key {
-                    for _property in key.values() {
+                    for (_, property) in key {
                         // property.link(self.resolve(property.state()));
                     }
                 }
@@ -219,7 +219,7 @@ pub mod ty {
     pub struct Entity<'a> {
         pub name: String,
         pub parent: DerefCell<'a, super::Schema<'a>>,
-        pub key: Option<HashMap<Identifier, DerefCell<'a, property::Property<'a>>>>,
+        pub key: Option<Vec<(Identifier, DerefCell<'a, property::Property<'a>>)>>,
         pub base_type: Option<DerefCell<'a, Entity<'a>, EntityPath>>,
         pub is_abstract: bool,
         pub open_type: bool,

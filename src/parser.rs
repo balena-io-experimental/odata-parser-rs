@@ -50,7 +50,8 @@ use std::ops::RangeTo;
 
 #[derive(Clone, Debug)]
 // If we don't derive Copy the compiler will scream at you if you try to reuse the same "slice"
-// twice.
+// twice. Also, this struct should be as small as possible since we're cloning it all over the
+// place
 pub struct Input<'a> {
     parser: &'a Parser<'a>,
     data: &'a str,
@@ -270,36 +271,36 @@ use std::cell::RefCell;
 #[derive(Debug)]
 struct Scope<'a> {
     /// Essentially a list of stack frames
-    vars: RefCell<Vec<Vec<(String, (ast::NodeId, ast::Ty<'a>))>>>,
+    frames: RefCell<Vec<HashMap<&'a str, Rc<Expr<'a>>>>>,
 }
 
 impl<'a> Scope<'a> {
     fn new() -> Self {
         Scope {
-            vars: RefCell::new(vec![]),
+            frames: RefCell::new(vec![HashMap::new()]),
         }
     }
 
-    fn resolve(&self, name: &'a str) -> Option<(ast::NodeId, ast::Ty<'a>)> {
-        self.vars.borrow().iter().rev().find_map(|frame| {
-            frame
-                .iter()
-                .rev()
-                .find(|v| v.0 == name)
-                .map(|v| v.1.clone())
-        })
+    /// Walks the frames in reverse order until it finds a match
+    fn resolve(&self, name: &'a str) -> Option<Rc<Expr<'a>>> {
+        self.frames.borrow()
+            .iter().rev()
+            .find_map(|frame| frame.get(name).map(|e| e.to_owned()))
     }
 
-    fn push(&self, name: &str, id: ast::NodeId, ty: ast::Ty) {
-        unimplemented!()
+    fn push(&self, name: &'a str, expr: Rc<Expr<'a>>) {
+        let mut frames = self.frames.borrow_mut();
+        frames.last_mut().unwrap().insert(name, expr);
     }
 
     fn push_frame(&self) {
-        unimplemented!()
+        let mut frames = self.frames.borrow_mut();
+        frames.push(HashMap::new());
     }
 
     fn pop_frame(&self) {
-        unimplemented!()
+        let mut frames = self.frames.borrow_mut();
+        frames.pop();
     }
 }
 
@@ -308,7 +309,8 @@ pub struct Parser<'a> {
     document: &'a schema::Document<'a>,
     next_node_id: Cell<ast::NodeId>,
     scope: Scope<'a>,
-    // bound_vars: RefCell<HashMap<Identifier, (Type, Option<Value>>>,
+    unparsed_params: RefCell<HashMap<&'a str, &'a str>>,
+    parameters: RefCell<HashMap<&'a str, Rc<Expr<'a>>>>,
 }
 
 impl<'a, 'b> Parser<'a> {
@@ -317,6 +319,8 @@ impl<'a, 'b> Parser<'a> {
             document: document,
             next_node_id: Cell::new(1),
             scope: Scope::new(),
+            unparsed_params: RefCell::new(HashMap::new()),
+            parameters: RefCell::new(HashMap::new()),
         }
     }
 
@@ -398,6 +402,7 @@ fn odataRelativeUri<'a>(
 ) -> IResult<Input<'a>, ast::RelativeURI<'a>> {
     let (path, input) = input.split_at(input.data.find('?').unwrap_or(input.len()));
     let (query, fragment) = input.split_at(input.data.find('#').unwrap_or(input.len()));
+    let query = query.slice(1..);
     //FIXME we should split and decode path here isntead of parsing it as a string
     // let path = path.split('/');
 
@@ -428,20 +433,75 @@ fn odataRelativeUri<'a>(
             )),
         ),
         |input: Input<'a>| {
-            // FIXME fully computing the resourcePath expression needs the parameter aliases
-            // FIXME we have to ensure that the full path was consumed
-            let (input, resource) =
-                all_consuming(|i| resourcePath(i, &doc.entity_container))(path.clone())?;
+            // We prepopulate possible parameters that could be used in in-path filters
+            // After processing the path whatever is left in unresolved parameters will be parsed
+            // according to the output type of the path and inserted into the parameter map
+            {
+                // separate scope to release the mut borrow as soon as we're done
+                let mut unparsed_params = input.parser.unparsed_params.borrow_mut();
+                for option in query.data.split('&') {
+                    if let Some(idx) = option.find('=') {
+                        let (key, value) = option.split_at(idx);
+                        let key = Input {
+                            parser: input.parser,
+                            data: key,
+                        };
+                        if let Ok((_, name)) = parameterAlias_wip2(key) {
+                            unparsed_params.insert(name.data, &value[1..]);
+                        }
+                    }
+                }
+            }
 
-            // let kind = ast::kind::PathKind::Single(ast::kind::Kind::Entity())
+            let (input, resource) = all_consuming(|i| resourcePath(i, &doc.entity_container))(path.clone())?;
+
+            input.parser.scope.push("$it", resource.clone());
+            input.parser.scope.push("$this", resource.clone());
+
+            let mut resource_query = ast::ResourceQuery::new(resource.clone());
+
+            {
+                // separate scope to release the mut borrows as soon as we're done
+                let mut params = input.parser.parameters.borrow_mut();
+                let mut unparsed_params = input.parser.unparsed_params.borrow_mut();
+
+                for (name, value) in unparsed_params.drain() {
+                    let value_input = Input{
+                        parser: input.parser,
+                        data: value,
+                    };
+
+                    let (_, value) = all_consuming(|i| commonExpr_wip(i, 0))(value_input)?;
+
+                    input.parser.scope.push(name, value.clone());
+                    resource_query.expr.params.push(value);
+                }
+            }
+
             let (input, options) = opt(preceded(tag("?"), |i| queryOptions_wip(i)))(query.clone())?;
-            Ok((
-                input,
-                ast::RelativeURI::Resource(ast::ResourcePath {
-                    resource: resource,
-                    options,
-                }),
-            ))
+
+            // Parse the rest of the options
+            // for option in query.data.split('&') {
+            //     if let Some(idx) = option.find('=') {
+            //         let (key, value) = option.split_at(idx);
+            //         let key = Input {
+            //             parser: input.parser,
+            //             data: key,
+            //         };
+            //         if let Err(_) = parameterAlias_wip2(key) {
+            //             let option_input = Input{
+            //                 parser: input.paser,
+            //                 data: option,
+            //             };
+            //             let (_, option) = queryOption_wip(option_input)?;
+            //             match option {
+            //                 Filter => opts.filter = Some(option),
+            //             }
+            //         }
+            //     }
+            // }
+
+            Ok((input, ast::RelativeURI::Resource(resource_query)))
         },
     ))(input);
 }
@@ -559,22 +619,40 @@ fn keyPredicate_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
 }
 //* simpleKey        = OPEN ( parameterAlias / keyPropertyValue ) CLOSE
 named!(simpleKey<Input, Input>, call!(recognize(tuple((OPEN, alt((parameterAlias, keyPropertyValue)), CLOSE)))));
-fn simpleKey_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
-    let value = alt((
-        |i| keyPropertyValue_wip(i),
-        // FIXME
-        expr(map(parameterAlias_wip, |_| {
-            ExprKind::Var(Rc::new(input.parser.expr(ExprKind::Unimplemented)))
-        })),
-    ));
+fn simpleKey_wip<'a>(input: Input<'a>, arg: &Rc<Expr>) -> ExprOutput<'a> {
+    Err(Err::Error((input, ErrorKind::Verify)))
+    // expr(
+    //     verify(
+    //         delimited(
+    //             OPEN,
+    //             alt((
+    //                 |i| keyPropertyValue_wip(i),
+    //                 // FIXME
+    //                 expr(map(parameterAlias_wip, |_| {
+    //                     ExprKind::Var(Rc::new(input.parser.expr(ExprKind::Unimplemented)))
+    //                 })),
+    //             )),
+    //             CLOSE
+    //         ),
+    //         |&foo| {
 
-    expr(map(delimited(OPEN, value, CLOSE), |k| {
-        ExprKind::Binary(
-            ast::BinOp::Eq,
-            Rc::new(input.parser.expr(ExprKind::Unimplemented)),
-            k,
-        )
-    }))(input.clone())
+    //         }
+    //     )
+    // )(input)
+
+
+    //     (input)?;
+
+    // ExprKind::Binary(
+    //     ast::BinOp::Eq,
+    //     Rc::new(input.parser.expr(ExprKind::Unimplemented)),
+    //     k,
+    // )
+
+    // assert(child.ty.key.
+
+    // expr(map(
+    // }))(input.clone())
 }
 //* compoundKey      = OPEN keyValuePair *( COMMA keyValuePair ) CLOSE
 named!(compoundKey<Input, Input>, call!(recognize(tuple((OPEN, keyValuePair, many0(tuple((COMMA, keyValuePair))), CLOSE)))));
@@ -809,10 +887,25 @@ fn complexPath_wip<'a>(
 //* filterInPath = '/$filter' EQ parameterAlias
 named!(filterInPath<Input, Input>, call!(recognize(tuple((tag("/$filter"), EQ, parameterAlias)))));
 fn filterInPath_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
-    expr(map(
+    let (input, param) = map_opt(
         preceded(tuple((tag("/$filter"), EQ)), parameterAlias_wip2),
-        |param| ExprKind::Filter(Rc::clone(child), param),
-    ))(input)
+        |param| {
+            input.parser.unparsed_params.borrow_mut().remove(param.data)
+        },
+    )(input.clone())?;
+
+    let param_input = Input{
+        parser: input.parser,
+        data: param,
+    };
+
+    param_input.parser.scope.push_frame();
+    param_input.parser.scope.push("$it", child.clone());
+    param_input.parser.scope.push("$this", child.clone());
+    let (_, expr) = all_consuming(|i| commonExpr_wip(i, 0))(param_input.clone())?;
+    param_input.parser.scope.pop_frame();
+
+    Ok((input.clone(), Rc::new(input.parser.expr(ExprKind::Filter(Rc::clone(child), expr)))))
 }
 //*
 //* each  = '/$each'
@@ -965,11 +1058,8 @@ named!(parameterName<Input, Input>, call!(recognize(odataIdentifier)));
 //* parameterAlias     = AT odataIdentifier
 named!(parameterAlias<Input, Input>, call!(preceded(AT, odataIdentifier)));
 named!(parameterAlias_wip<Input, ast::ParameterAlias>, call!(map(preceded(AT, odataIdentifier), |name| ast::ParameterAlias{name: name.data})));
-fn parameterAlias_wip2<'a>(input: Input<'a>) -> ExprOutput<'a> {
-    // FIXME resolve scope and assign proper nodeid
-    expr(map(preceded(AT, odataIdentifier), |name| {
-        ExprKind::Var(Rc::new(input.parser.expr(ExprKind::Unimplemented)))
-    }))(input.clone())
+fn parameterAlias_wip2<'a>(input: Input<'a>, ) -> IResult<Input<'a>, Input<'a>>  {
+    recognize(preceded(AT, odataIdentifier))(input)
 }
 //*
 //* crossjoin = '$crossjoin' OPEN
@@ -996,7 +1086,7 @@ fn queryOption_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::QueryOption<
     alt((
         |i| systemQueryOption_wip(i),
         value(ast::QueryOption::Alias, aliasAndValue),
-        value(ast::QueryOption::Name, nameAndValue),
+        value(ast::QueryOption::Name, nameAndValue), // this is the implicit parameter alias case in the protocol
         customQueryOption_wip,
     ))(input)
 }
@@ -1138,7 +1228,7 @@ named!(levels<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$levels"),
 //* filter = ( "$filter" / "filter" ) EQ boolCommonExpr
 named!(filter<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$filter"), tag_no_case("filter"))), EQ, boolCommonExpr)))));
 fn filter_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::QueryOption<'a>> {
-    let (input, _) = cut(tuple((opt(tag("$")), tag_no_case("filter"), EQ)))(input)?;
+    let (input, _) = tuple((opt(tag("$")), tag_no_case("filter"), EQ))(input)?;
 
     map(|i| commonExpr_wip(i, 0), ast::QueryOption::Filter)(input)
 }
@@ -1449,9 +1539,9 @@ fn commonExpr_wip<'a>(input: Input<'a>, prec: u8) -> ExprOutput<'a> {
         |i| notExpr_wip(i),
     ))(input)?;
 
-    while let (i, Some(op)) =
-        opt(verify(|i| binop_wip(i), |op| op.precedence() >= prec))(input.clone())?
-    {
+    // Precedence climbing. Avoids the excessive recursion that a standard recursive decent would
+    // have to do in order to correctly parse precedence
+    while let (i, Some(op)) = opt(verify(binop_wip, |op| op.precedence() >= prec))(input.clone())? {
         let prec = op.precedence();
 
         let (i, rhs) = match op {

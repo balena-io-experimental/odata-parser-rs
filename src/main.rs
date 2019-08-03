@@ -82,9 +82,8 @@ fn main() {
     let mut p = parser::Parser::new(&doc);
     // // println!("{:?}", parser::odataRelativeUri("ProductsByComplex(complex=@c)?@c={\"@odata.type\":\"doc.Customer\",\"Name\":\"Value\"}\n"));
     // // println!("{:#?}", p.parse("https://example.com/foobar/users/$filter=@foo/$filter=@bar/$count?$filter=true eq true"));
-    let (_, tree) = p
-        .parse("http://example.com/foobar/applications/$filter=@a/com.balena_cloud.api.user")
-        .unwrap();
+    let tree = p
+        .parse("http://example.com/foobar/applications/$filter=@a/com.balena_cloud.api.user?@a=true eq false&@b=true and true&$filter=true eq @b");
 
     println!("{:#?}", tree);
     // // println!("{:#?}", compiler::compile_sql(&tree, &doc));
