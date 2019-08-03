@@ -47,10 +47,94 @@ enum SelectColumn {
 	Query
 }
 
-// users/$filter=id lt 123/$filter=name eq 'foobar'/(12)
-// 	/manager
-// 	/applications/$filter=foo eq 23/(34)/
-// 	name/$value
+
+// (SELECT *, a + b AS total FROM application);
+//
+//
+// users/$filter=name eq 'foobar'/(12)/manager/applications/$filter=foo eq 23/(34)?$select=a,b,c,d($count=true)&$compute=a add b add c as total&$expand=foovar
+//
+//
+
+//
+//
+// SELECT
+// 	a, b, c, total.v, navigation.v
+// FROM
+// 	application a,
+// 	-- $compute
+// 	LEFT JOIN LATERAL (SELECT a + b + c) AS total ON true,
+// 	-- @a
+// 	LEFT JOIN LATERAL (param expression) AS param_a ON true,
+// 	-- $expand
+// 	LATERAL (SELECT ARRAY(SELECT(....))) AS navigation
+// WHERE
+// 	id = 34
+// 	AND foo = 23
+// 	AND EXISTS(
+// 		SELECT 1
+// 		FROM
+// 			users u1
+// 		WHERE
+// 			manager = a.id
+// 			AND u1.id = 12
+// 			AND u1.name = 'foobar'
+// 	)
+// 	AND $filter
+//
+//
+//
+//
+//
+//
+//
+// SELECT default_selection
+// FROM application a
+// WHERE
+// 	EXISTS (SELECT 1 FROM users u WHERE u.manager = application.owner
+// 		AND name = foobar
+// 		AND id = 12
+// 	)
+// 	AND foo = 23
+// 	AND id = 34
+//
+//
+//
+// query:
+// 	filter:
+// 	select:
+// 	expand:
+// 	resource:
+// 		Expr::keyPredicate
+// 				id: 34
+// 				expr: Expr::filter
+// 					filter: Expr::eq
+// 						lhs: Expr::Literal
+// 							value: 23
+// 						rhs: Expr::prop
+// 							ident: foo
+// 							expr: Expr::???
+// 					collection: Expr::navigation
+// 						ident: applications
+// 						expr: Expr::prop
+// 							name: manager
+// 							expr: Expr::keyPredicate
+// 								id: 12
+// 								expr: Expr::filter
+// 									filter: Expr::eq
+// 										lhs: Expr::prop
+// 											name: name
+// 											expr: Expr::???
+// 										rhs: Expr::Literal
+// 											value: 'foobar'
+// 									collection: Expr::entityset
+// 										name: users
+//
+//
+
+
+
+
+
 //
 //
 // SELECT
