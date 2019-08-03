@@ -417,7 +417,7 @@ pub struct QueryExpr<'a> {
     pub orderby: Vec<Rc<Expr<'a>>>,
     pub skip: Option<u32>,
     pub top: Option<u32>,
-    pub inlinecount: bool,
+    pub count: bool,
     pub levels: Option<u32>,
     pub compute: Vec<Rc<Expr<'a>>>,
     pub params: Vec<Rc<Expr<'a>>>,
@@ -434,7 +434,7 @@ impl<'a> QueryExpr<'a> {
             orderby: vec![],
             skip: None,
             top: None,
-            inlinecount: false,
+            count: false,
             levels: None,
             compute: vec![],
             params: vec![],
@@ -445,11 +445,11 @@ impl<'a> QueryExpr<'a> {
 #[derive(Debug, Clone)]
 pub struct ResourceQuery<'a> {
     pub expr: QueryExpr<'a>,
-    pub deltatoken: Option<String>,
-    pub format: Option<String>,
-    pub id: Option<String>,
-    pub schemaversion: Option<String>,
-    pub skiptoken: Option<String>,
+    pub delta_token: Option<&'a str>,
+    pub format: Option<&'a str>,
+    pub id: Option<&'a str>,
+    pub schema_version: Option<&'a str>,
+    pub skip_token: Option<&'a str>,
     pub index: Option<u32>,
 }
 
@@ -458,10 +458,10 @@ impl<'a> ResourceQuery<'a> {
         Self {
             expr: QueryExpr::new(expr),
             id: None,
-            deltatoken: None,
+            delta_token: None,
             format: None,
-            schemaversion: None,
-            skiptoken: None,
+            schema_version: None,
+            skip_token: None,
             index: None,
         }
     }

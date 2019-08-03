@@ -31,6 +31,26 @@ use nom::sequence::*;
 
 use std::cell::Cell;
 
+enum QueryOption<'a> {
+    Select(Vec<Rc<ast::QueryExpr<'a>>>),
+    Expand(Vec<Rc<ast::QueryExpr<'a>>>),
+    Filter(Rc<Expr<'a>>),
+    Search(Rc<Expr<'a>>),
+    Orderby(Vec<Rc<Expr<'a>>>),
+    Skip(u32),
+    Top(u32),
+    Count(bool),
+    Levels(u32),
+    Compute(Vec<Rc<Expr<'a>>>),
+    Params(Vec<Rc<Expr<'a>>>),
+    Deltatoken(&'a str),
+    Format(&'a str),
+    Id(&'a str),
+    Schemaversion(&'a str),
+    Skiptoken(&'a str),
+    Index(u32),
+}
+
 /// Expression result
 fn expr<'a, F>(f: F) -> impl Fn(Input<'a>) -> ExprOutput<'a>
 where
@@ -310,7 +330,6 @@ pub struct Parser<'a> {
     next_node_id: Cell<ast::NodeId>,
     scope: Scope<'a>,
     unparsed_params: RefCell<HashMap<&'a str, &'a str>>,
-    parameters: RefCell<HashMap<&'a str, Rc<Expr<'a>>>>,
 }
 
 impl<'a, 'b> Parser<'a> {
@@ -320,7 +339,6 @@ impl<'a, 'b> Parser<'a> {
             next_node_id: Cell::new(1),
             scope: Scope::new(),
             unparsed_params: RefCell::new(HashMap::new()),
-            parameters: RefCell::new(HashMap::new()),
         }
     }
 
@@ -402,7 +420,6 @@ fn odataRelativeUri<'a>(
 ) -> IResult<Input<'a>, ast::RelativeURI<'a>> {
     let (path, input) = input.split_at(input.data.find('?').unwrap_or(input.len()));
     let (query, fragment) = input.split_at(input.data.find('#').unwrap_or(input.len()));
-    let query = query.slice(1..);
     //FIXME we should split and decode path here isntead of parsing it as a string
     // let path = path.split('/');
 
@@ -439,7 +456,7 @@ fn odataRelativeUri<'a>(
             {
                 // separate scope to release the mut borrow as soon as we're done
                 let mut unparsed_params = input.parser.unparsed_params.borrow_mut();
-                for option in query.data.split('&') {
+                for option in query.data[1..].split('&') {
                     if let Some(idx) = option.find('=') {
                         let (key, value) = option.split_at(idx);
                         let key = Input {
@@ -462,7 +479,6 @@ fn odataRelativeUri<'a>(
 
             {
                 // separate scope to release the mut borrows as soon as we're done
-                let mut params = input.parser.parameters.borrow_mut();
                 let mut unparsed_params = input.parser.unparsed_params.borrow_mut();
 
                 for (name, value) in unparsed_params.drain() {
@@ -471,6 +487,7 @@ fn odataRelativeUri<'a>(
                         data: value,
                     };
 
+                    // FIXME parameter values be arrayOrObj, not just commonExpr
                     let (_, value) = all_consuming(|i| commonExpr_wip(i, 0))(value_input)?;
 
                     input.parser.scope.push(name, value.clone());
@@ -478,30 +495,10 @@ fn odataRelativeUri<'a>(
                 }
             }
 
-            let (input, options) = opt(preceded(tag("?"), |i| queryOptions_wip(i)))(query.clone())?;
+            // FIXME can we avoid the clone here?
+            let (input, opts) = opt(preceded(tag("?"), |i| queryOptions_wip(i, resource_query.clone())))(query.clone())?;
 
-            // Parse the rest of the options
-            // for option in query.data.split('&') {
-            //     if let Some(idx) = option.find('=') {
-            //         let (key, value) = option.split_at(idx);
-            //         let key = Input {
-            //             parser: input.parser,
-            //             data: key,
-            //         };
-            //         if let Err(_) = parameterAlias_wip2(key) {
-            //             let option_input = Input{
-            //                 parser: input.paser,
-            //                 data: option,
-            //             };
-            //             let (_, option) = queryOption_wip(option_input)?;
-            //             match option {
-            //                 Filter => opts.filter = Some(option),
-            //             }
-            //         }
-            //     }
-            // }
-
-            Ok((input, ast::RelativeURI::Resource(resource_query)))
+            Ok((input, ast::RelativeURI::Resource(opts.unwrap_or(resource_query))))
         },
     ))(input);
 }
@@ -696,7 +693,7 @@ fn keyPropertyValue_wip<'a>(input: Input<'a>) -> ExprOutput<'a> {
 named!(keyPropertyAlias<Input, Input>, call!(recognize(odataIdentifier)));
 //* keyPathSegments  = 1*( "/" keyPathLiteral )
 named!(keyPathSegments<Input, Input>, call!(recognize(many1(tuple((tag("/"), keyPathLiteral))))));
-fn keyPathSegments_wip<'a>(mut input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
+fn keyPathSegments_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
     Err(Err::Error((input, ErrorKind::Verify)))
     // let mut result = vec![];
 
@@ -1074,20 +1071,62 @@ named!(crossjoin<Input, Input>, call!(recognize(tuple((tag("$crossjoin"), OPEN, 
 //*
 //* queryOptions = queryOption *( "&" queryOption )
 named!(queryOptions<Input, Input>, call!(recognize(tuple((queryOption, many0(tuple((tag("&"), queryOption))))))));
-fn queryOptions_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::QueryOption<'a>>> {
-    separated_nonempty_list(tag("&"), |i| queryOption_wip(i))(input)
+fn queryOptions_wip<'a>(input: Input<'a>, mut root: ast::ResourceQuery<'a>) -> IResult<Input<'a>, ast::ResourceQuery<'a>> {
+    for option in input.data.split('&') {
+        if let Some(idx) = option.find('=') {
+            let (key, value) = option.split_at(idx);
+            let key = Input {
+                parser: input.parser,
+                data: key,
+            };
+            if let Err(_) = parameterAlias_wip2(key) {
+                let option_input = Input{
+                    parser: input.parser,
+                    data: option,
+                };
+
+                let (_, option) = queryOption_wip(option_input)?;
+
+                match option {
+                    QueryOption::Select(v) => root.expr.select = v,
+                    QueryOption::Expand(v) => root.expr.expand = v,
+                    QueryOption::Filter(e) => root.expr.filter = Some(e),
+                    QueryOption::Search(e) => root.expr.search = Some(e),
+                    QueryOption::Orderby(v) => root.expr.orderby = v,
+                    QueryOption::Skip(n) => root.expr.skip = Some(n),
+                    QueryOption::Top(n) => root.expr.top = Some(n),
+                    QueryOption::Count(c) => root.expr.count = c,
+                    QueryOption::Levels(n) => root.expr.levels = Some(n),
+                    QueryOption::Compute(v) => root.expr.compute = v,
+                    QueryOption::Params(v) => root.expr.params = v,
+                    QueryOption::Deltatoken(s) => root.delta_token = Some(s),
+                    QueryOption::Format(s) => root.format = Some(s),
+                    QueryOption::Id(s) => root.id = Some(s),
+                    QueryOption::Schemaversion(s) => root.schema_version = Some(s),
+                    QueryOption::Skiptoken(s) => root.skip_token = Some(s),
+                    QueryOption::Index(n) => root.index = Some(n),
+                }
+            }
+        }
+    }
+    Ok((input.slice(input.input_len()..), root))
 }
 //* queryOption  = systemQueryOption
 //*              / aliasAndValue
 //*              / nameAndValue
 //*              / customQueryOption
 named!(queryOption<Input, Input>, call!(alt((systemQueryOption, aliasAndValue, nameAndValue, customQueryOption))));
-fn queryOption_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::QueryOption<'a>> {
+fn queryOption_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, QueryOption<'a>> {
     alt((
+        // XXX we have to be careful here. A malformed $filter for example would fail the first
+        // parser and fall through to the custom query option one which will match anything,
+        // leading to running the wrong query. We have to cut() on error after we successfully
+        // matched the prefix of a system query option
         |i| systemQueryOption_wip(i),
-        value(ast::QueryOption::Alias, aliasAndValue),
-        value(ast::QueryOption::Name, nameAndValue), // this is the implicit parameter alias case in the protocol
-        customQueryOption_wip,
+        |i| unimplemented!(),
+        // value(ast::QueryOption::Alias, aliasAndValue),
+        // value(ast::QueryOption::Name, nameAndValue), // this is the implicit parameter alias case in the protocol
+        // customQueryOption_wip,
     ))(input)
 }
 //*
@@ -1148,23 +1187,24 @@ named!(systemQueryOption<Input, Input>, call!(alt((compute
 					   , skiptoken
 					   , top
 					   , index))));
-fn systemQueryOption_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::QueryOption<'a>> {
+fn systemQueryOption_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, QueryOption<'a>> {
     alt((
-        value(ast::QueryOption::Compute, compute),
-        value(ast::QueryOption::DeltaToken, deltatoken),
-        value(ast::QueryOption::Expand, expand),
+        // value(QueryOption::Compute, compute),
+        // value(QueryOption::DeltaToken, deltatoken),
+        // value(QueryOption::Expand, expand),
         |i| filter_wip(i),
-        format_wip,
-        value(ast::QueryOption::Id, id),
-        value(ast::QueryOption::InlineCount, inlinecount),
-        value(ast::QueryOption::OrderBy, orderby),
-        value(ast::QueryOption::SchemaVersion, schemaversion),
-        value(ast::QueryOption::Search, search),
-        value(ast::QueryOption::Select, select),
-        value(ast::QueryOption::Skip, skip),
-        value(ast::QueryOption::SkipToken, skiptoken),
-        value(ast::QueryOption::Top, top),
-        value(ast::QueryOption::Index, index),
+        |i| filter_wip(i),
+        // format_wip,
+        // value(QueryOption::Id, id),
+        // value(QueryOption::Count, inlinecount),
+        // value(QueryOption::OrderBy, orderby),
+        // value(QueryOption::SchemaVersion, schemaversion),
+        // value(QueryOption::Search, search),
+        // value(QueryOption::Select, select),
+        // value(QueryOption::Skip, skip),
+        // value(QueryOption::SkipToken, skiptoken),
+        // value(QueryOption::Top, top),
+        // value(QueryOption::Index, index),
     ))(input)
 }
 
@@ -1227,10 +1267,11 @@ named!(levels<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$levels"),
 //*
 //* filter = ( "$filter" / "filter" ) EQ boolCommonExpr
 named!(filter<Input, Input>, call!(recognize(tuple((alt((tag_no_case("$filter"), tag_no_case("filter"))), EQ, boolCommonExpr)))));
-fn filter_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, ast::QueryOption<'a>> {
+fn filter_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, QueryOption<'a>> {
     let (input, _) = tuple((opt(tag("$")), tag_no_case("filter"), EQ))(input)?;
 
-    map(|i| commonExpr_wip(i, 0), ast::QueryOption::Filter)(input)
+    // Any errors after this point are fatal
+    cut(map(|i| commonExpr_wip(i, 0), QueryOption::Filter))(input)
 }
 //*
 //* orderby     = ( "$orderby" / "orderby" ) EQ orderbyItem *( COMMA orderbyItem )
