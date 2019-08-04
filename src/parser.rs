@@ -971,13 +971,34 @@ named!(boundOperation<Input, Input>, call!(recognize(tuple((tag("/"), alt((bound
 								     , boundFunctionCallNoParens
 								     )))))));
 fn boundOperation_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathSegment<'a>>> {
-    // FIXME
-    value(vec![], boundOperation)(input)
+    unimplemented!()
 }
-fn boundOperation_wip2<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
-    // FIXME
-    Err(nom::Err::Error((input, nom::error::ErrorKind::Alt)))
+fn boundOperation_wip2<'a>(input: Input<'a>, arg: &Rc<Expr<'a>>) -> ExprOutput<'a> {
+    unimplemented!()
+    // let (input, bound_op) = preceded(
+    //     tag("/"),
+    //     alt((
+    //         |i| boundActionCall_wip(i, arg),
+    //         |i| boundFunctionCall_wip(i, arg)
+    //     ))
+    // )(input)?;
+
+    // let (input, nav) = match &bound_op.node {
+    //     ExprKind::Function(f, _) => (input, None)
+    //     // match (f.return_type.ty, f.return_type.collection) {
+    //     //     (schema::ty::Ty::Entity(_), true) => opt(|i| collectionNavigation_wip(i, &bound_op))(input)?;
+    //     //     (schema::ty::Ty::Entity(_), false) => opt(|i| singleNavigation_wip(i, &bound_op))(input)?;
+    //     //     (schema::ty::Ty::Complex(_), true) => opt(|i| complexColPath_wip(i, &bound_op))(input)?;
+    //     //     (schema::ty::Ty::Complex(_), false) => opt(|i| complexPath_wip(i, &bound_op))(input)?;
+    //     //     (schema::ty::Ty::Primitive(_), true) => opt(|i| primitiveColPath_wip(i, &bound_op))(input)?;
+    //     //     (schema::ty::Ty::Primitive(_), false) => opt(|i| primitivePath_wip(i, &bound_op))(input)?;
+    //     // },
+    //     ExprKind::Action(a, _) => (input, None),
+    // };
+
+    // Ok((input, nav.unwrap_or(bound_op)))
 }
+
 //*
 //* actionImportCall = actionImport
 named!(actionImportCall<Input, Input>, call!(recognize(actionImport)));
@@ -985,6 +1006,16 @@ named!(actionImportCall<Input, Input>, call!(recognize(actionImport)));
 //*                    ; with the added restriction that the binding parameter MUST be either an entity or collection of entities
 //*                    ; and is specified by reference using the URI immediately preceding (to the left) of the boundActionCall
 named!(boundActionCall<Input, Input>, call!(recognize(tuple((namespace, tag("."), action)))));
+fn boundActionCall_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
+    let (input, (namespace, item)) = namespaced_item(input)?;
+
+    input.parser.document.schemas
+        .get(namespace)
+        //FIXME check if the first parameter is the same type as the current child
+        .and_then(|s| s.actions.get(item).filter(|a| a.is_bound))
+        .map(|a| (input.clone(), Rc::new(input.parser.expr(ExprKind::Action(a, vec![Rc::clone(child)])))))
+        .ok_or(Err::Error((input.clone(), ErrorKind::Verify)))
+}
 //*
 //* ; The following boundXxxFunctionCall rules have the added restrictions that
 //* ;  - the function MUST support binding, and
@@ -1018,6 +1049,20 @@ named!(boundFunctionCallNoParens<Input, Input>, call!(recognize(alt((tuple((name
 						   	      , tuple((namespace, tag("."), primitiveFunction))
 						   	      , tuple((namespace, tag("."), primitiveColFunction))
 							 )))));
+fn boundFunctionCall_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
+    let (input, (namespace, item)) = namespaced_item(input)?;
+
+    let (input, function) = input.parser.document.schemas
+        .get(namespace)
+        //FIXME check if the first parameter is the same type as the current child
+        .and_then(|s| s.functions.get(item).filter(|f| f.is_bound))
+        .map(|f| (input.clone(), Rc::new(input.parser.expr(ExprKind::Function(&f, vec![Rc::clone(child)])))))
+        .ok_or(Err::Error((input.clone(), ErrorKind::Verify)))?;
+
+    let (input, args) = opt(|i| functionParameters_wip(i, &function))(input)?;
+
+    Ok((input, args.unwrap_or(function)))
+}
 
 //*
 //* entityFunctionImportCall       = entityFunctionImport       functionParameters
@@ -1048,6 +1093,10 @@ named!(functionImportCallNoParens<Input, Input>, call!(alt((entityFunctionImport
 //*
 //* functionParameters = OPEN [ functionParameter *( COMMA functionParameter ) ] CLOSE
 named!(functionParameters<Input, Input>, call!(recognize(tuple((OPEN, opt(tuple((functionParameter, many0(tuple((COMMA, functionParameter)))))), CLOSE)))));
+fn functionParameters_wip<'a>(input: Input<'a>, function: &Rc<Expr<'a>>) -> ExprOutput<'a> {
+    let (input, params) = delimited(OPEN, separated_list(COMMA, functionParameter), CLOSE)(input)?;
+    unimplemented!()
+}
 //* functionParameter  = parameterName EQ ( parameterAlias / primitiveLiteral )
 named!(functionParameter<Input, Input>, call!(recognize(tuple((parameterName, EQ, alt((parameterAlias, primitiveLiteral)))))));
 //* parameterName      = odataIdentifier
@@ -1055,7 +1104,7 @@ named!(parameterName<Input, Input>, call!(recognize(odataIdentifier)));
 //* parameterAlias     = AT odataIdentifier
 named!(parameterAlias<Input, Input>, call!(preceded(AT, odataIdentifier)));
 named!(parameterAlias_wip<Input, ast::ParameterAlias>, call!(map(preceded(AT, odataIdentifier), |name| ast::ParameterAlias{name: name.data})));
-fn parameterAlias_wip2<'a>(input: Input<'a>, ) -> IResult<Input<'a>, Input<'a>>  {
+fn parameterAlias_wip2<'a>(input: Input<'a>) -> IResult<Input<'a>, Input<'a>>  {
     recognize(preceded(AT, odataIdentifier))(input)
 }
 //*
@@ -1072,6 +1121,7 @@ named!(crossjoin<Input, Input>, call!(recognize(tuple((tag("$crossjoin"), OPEN, 
 //* queryOptions = queryOption *( "&" queryOption )
 named!(queryOptions<Input, Input>, call!(recognize(tuple((queryOption, many0(tuple((tag("&"), queryOption))))))));
 fn queryOptions_wip<'a>(input: Input<'a>, mut root: ast::ResourceQuery<'a>) -> IResult<Input<'a>, ast::ResourceQuery<'a>> {
+    // FIXME we have to parse $compute first
     for option in input.data.split('&') {
         if let Some(idx) = option.find('=') {
             let (key, value) = option.split_at(idx);

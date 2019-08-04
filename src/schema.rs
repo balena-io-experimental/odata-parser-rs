@@ -553,7 +553,7 @@ pub struct Function<'a> {
     pub parent: DerefCell<'a, Schema<'a>>,
     pub is_bound: bool,
     pub entity_set_path: String,
-    pub parameter: Vec<Parameter<'a, Function<'a>>>,
+    pub parameters: Vec<Parameter<'a, Function<'a>>>,
     pub return_type: ReturnType<'a, Function<'a>>,
     pub is_composable: bool,
 }
