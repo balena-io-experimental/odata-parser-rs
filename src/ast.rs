@@ -342,7 +342,7 @@ pub enum ExprKind<'a> {
     All,
     Count(Rc<Expr<'a>>),
     Each(Rc<Expr<'a>>),
-    Key(Rc<Expr<'a>>, Rc<Expr<'a>>),
+    Key(Rc<Expr<'a>>, Vec<Rc<Expr<'a>>>),
     Property(&'a schema::property::Property<'a>),
     Ref(Rc<Expr<'a>>),
     Value,
@@ -397,7 +397,12 @@ impl<'a, 'b> ExprKind<'a> {
             ExprKind::All => unimplemented!(),
             ExprKind::Count(_) => unimplemented!(),
             ExprKind::Each(collection) => unimplemented!(),
-            ExprKind::Key(collection, keys) => unimplemented!(),
+            ExprKind::Key(collection, keys) => {
+                match collection.ty {
+                    ty::Ty::Collection(t) => t.into(),
+                    _ => panic!(),
+                }
+            },
             ExprKind::Property(_) => unimplemented!(),
             ExprKind::Ref(_) => unimplemented!(),
             ExprKind::Value => unimplemented!(),

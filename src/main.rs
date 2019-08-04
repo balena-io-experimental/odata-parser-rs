@@ -83,7 +83,7 @@ fn main() {
     // // println!("{:?}", parser::odataRelativeUri("ProductsByComplex(complex=@c)?@c={\"@odata.type\":\"doc.Customer\",\"Name\":\"Value\"}\n"));
     // // println!("{:#?}", p.parse("https://example.com/foobar/users/$filter=@foo/$filter=@bar/$count?$filter=true eq true"));
     let (_, tree) = p
-        .parse("http://example.com/foobar/applications/$filter=@a/com.balena_cloud.api.user?@a=true eq false&@b=true and true&$filter=true eq false")
+        .parse("http://example.com/foobar/applications(true)")
         .unwrap();
 
     println!("{:#?}", tree);

@@ -452,10 +452,7 @@ fn odataRelativeUri<'a>(
             )),
         ),
         |input: Input<'a>| {
-            // We prepopulate possible parameters that could be used in in-path filters
-            // After processing the path whatever is left in unresolved parameters will be parsed
-            // according to the output type of the path and inserted into the parameter map
-            {
+            if query.data.len() > 0 {
                 // separate scope to release the mut borrow as soon as we're done
                 let mut unparsed_params = input.parser.unparsed_params.borrow_mut();
                 for option in query.data[1..].split('&') {
@@ -609,7 +606,8 @@ fn collectionNavPath_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutp
 //*
 //* keyPredicate     = simpleKey / compoundKey / keyPathSegments
 named!(keyPredicate<Input, Input, Error>, call!(alt((simpleKey, compoundKey, keyPathSegments))));
-fn keyPredicate_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
+fn keyPredicate_wip<'a>(input: Input<'a>, child: &Rc<Expr<'a>>) -> ExprOutput<'a> {
+    //FIXME typecheck we are actually operating on a keyed resource
     alt((
         |i| simpleKey_wip(i, child),
         |i| compoundKey_wip(i, child),
@@ -618,62 +616,25 @@ fn keyPredicate_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
 }
 //* simpleKey        = OPEN ( parameterAlias / keyPropertyValue ) CLOSE
 named!(simpleKey<Input, Input, Error>, call!(recognize(tuple((OPEN, alt((parameterAlias, keyPropertyValue)), CLOSE)))));
-fn simpleKey_wip<'a>(input: Input<'a>, arg: &Rc<Expr>) -> ExprOutput<'a> {
-    Err(Err::Error(()))
-    // expr(
-    //     verify(
-    //         delimited(
-    //             OPEN,
-    //             alt((
-    //                 |i| keyPropertyValue_wip(i),
-    //                 // FIXME
-    //                 expr(map(parameterAlias_wip, |_| {
-    //                     ExprKind::Var(Rc::new(input.parser.expr(ExprKind::Unimplemented)))
-    //                 })),
-    //             )),
-    //             CLOSE
-    //         ),
-    //         |&foo| {
+fn simpleKey_wip<'a>(input: Input<'a>, arg: &Rc<Expr<'a>>) -> ExprOutput<'a> {
+    let (input, key) = delimited(
+        OPEN,
+        alt((
+            keyPropertyValue_wip,
+            map_opt(parameterAlias_wip, |n| input.parser.scope.resolve(n.name))
+        )),
+        CLOSE
+    )(input.clone())?;
 
-    //         }
-    //     )
-    // )(input)
-
-
-    //     (input)?;
-
-    // ExprKind::Binary(
-    //     ast::BinOp::Eq,
-    //     Rc::new(input.parser.expr(ExprKind::Unimplemented)),
-    //     k,
-    // )
-
-    // assert(child.ty.key.
-
-    // expr(map(
-    // }))(input.clone())
+    //FIXME typecheck we are actually operating on a keyed resource
+    Ok((input.clone(), Rc::new(input.parser.expr(ExprKind::Key(arg.clone(), vec![key])))))
 }
 //* compoundKey      = OPEN keyValuePair *( COMMA keyValuePair ) CLOSE
 named!(compoundKey<Input, Input, Error>, call!(recognize(tuple((OPEN, keyValuePair, many0(tuple((COMMA, keyValuePair))), CLOSE)))));
-fn compoundKey_wip<'a>(input: Input<'a>, child: &Rc<Expr>) -> ExprOutput<'a> {
-    Err(Err::Error(()))
-    // let collection: ast::ty::Collection = typecheck(child.ty, input)?;
-    // let entity: ast::ty::Entity = typecheck(collection, input)?;
+fn compoundKey_wip<'a>(input: Input<'a>, arg: &Rc<Expr<'a>>) -> ExprOutput<'a> {
+    let (input, key) = delimited(OPEN, separated_nonempty_list(COMMA, |i| keyValuePair_wip(i, arg)), CLOSE)(input)?;
 
-    // let key = entity.key.ok_or(Err(Err::Error((input, ErrorKind::Verify))))?;
-
-    // let values: Vec<Option<Rc<Expr>>> = vec![None, key.len()];
-
-    // for idx in [0..key.len()] {
-    // 	if idx > 0 {
-
-    // 	}
-    // 	let (i, key) = verify(keyValuePair_wip(i, keys), |key| values[key].is_none())(input)?;
-    // 	input = i;
-    // 	values[key] =
-    // }
-
-    // map(delimited(OPEN, separated_nonempty_list(COMMA, |i| keyValuePair_wip(i, props, key)), CLOSE), |v| ast::KeyPredicate{values: v})(input)
+    Ok((input.clone(), Rc::new(input.parser.expr(ExprKind::Key(arg.clone(), key)))))
 }
 
 //* keyValuePair     = ( primitiveKeyProperty / keyPropertyAlias  ) EQ ( parameterAlias / keyPropertyValue )
@@ -976,7 +937,7 @@ fn boundOperation_wip<'a>(input: Input<'a>) -> IResult<Input<'a>, Vec<ast::PathS
     unimplemented!()
 }
 fn boundOperation_wip2<'a>(input: Input<'a>, arg: &Rc<Expr<'a>>) -> ExprOutput<'a> {
-    unimplemented!()
+    Err(Err::Error(()))
     // let (input, bound_op) = preceded(
     //     tag("/"),
     //     alt((
