@@ -1,8 +1,9 @@
 use std::cell::Cell;
 use std::fmt::Debug;
 use std::ops::Deref;
+use serde::{Serialize, Serializer};
 
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Serialize)]
 pub struct Identity;
 
 impl<'a, T> Resolve<'a, T> for Identity {
@@ -23,6 +24,18 @@ pub struct DerefCell<'a, T, S: Resolve<'a, T> = Identity> {
     state: S,
 }
 
+impl<'a, T, Z: Resolve<'a, T>> Serialize for DerefCell<'a, T, Z>
+where
+    Z: Serialize
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+    {
+        self.state.serialize(serializer)
+    }
+}
+
 impl<'a, T> DerefCell<'a, T, Identity> {
     pub fn new() -> Self {
         DerefCell {
@@ -32,7 +45,7 @@ impl<'a, T> DerefCell<'a, T, Identity> {
     }
 }
 
-impl<'a, T, S: Resolve<'a, T>> DerefCell<'a, T, S> {
+impl<'a, T, S: 'static+Resolve<'a, T>> DerefCell<'a, T, S> {
     pub fn with_state(state: S) -> Self {
         DerefCell {
             value: Cell::new(None),
