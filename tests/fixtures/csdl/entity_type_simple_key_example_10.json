@@ -1,0 +1,21 @@
+{
+  "$Version": "4.01",
+  "$EntityContainer": "test.namespace.test",
+  "test.namespace": {
+    "Category": {
+      "$Kind": "EntityType",
+      "$Key": [
+        "ID"
+      ],
+      "ID": {
+        "$Type": "Edm.Int32"
+      },
+      "Name": {
+        "$Nullable": true
+      }
+    },
+    "test": {
+      "$Kind": "EntityContainer"
+    }
+  }
+}

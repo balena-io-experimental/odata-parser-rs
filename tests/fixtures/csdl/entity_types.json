@@ -1,0 +1,18 @@
+{
+  "$Version": "4.01",
+  "$EntityContainer": "test.namespace.test",
+  "test.namespace": {
+    "dummy_entity": {
+      "$Kind": "EntityType",
+      "$Abstract": true,
+      "$OpenType": true,
+      "$HasStream": true,
+      "id": {
+        "$Type": "Edm.Guid"
+      }
+    },
+    "test": {
+      "$Kind": "EntityContainer"
+    }
+  }
+}

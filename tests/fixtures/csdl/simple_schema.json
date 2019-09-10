@@ -1,0 +1,9 @@
+{
+  "$Version": "4.01",
+  "$EntityContainer": "test.namespace.test",
+  "test.namespace": {
+    "test": {
+      "$Kind": "EntityContainer"
+    }
+  }
+}
