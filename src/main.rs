@@ -1,10 +1,16 @@
 #![recursion_limit = "128"]
+#![feature(const_fn)]
 
+#[macro_use]
+extern crate handlebars;
 #[macro_use]
 extern crate nom;
-
 #[macro_use]
 extern crate maplit;
+#[macro_use]
+extern crate lazy_static;
+
+extern crate rstring_builder;
 
 mod ast;
 mod csdl;
@@ -12,13 +18,18 @@ mod derefcell;
 mod parser;
 mod schema;
 mod util;
+mod abstract_model;
+mod db;
+
 
 use derefcell::DerefCell;
 use schema::map;
 use schema::property::{Navigation, Structural};
 use schema::ty::*;
 use schema::{Document, EntityContainer, EntityContainerPath, EntitySet, Schema};
+use db::engine::generate_ddl;
 use crate::schema::Action;
+use crate::abstract_model::{UuidDefaults, AbstractModel, AbstractTable, AbstractColumn, AbstractDataType, AbstractTableConstraints, AbstractTableColumnConstraintTypes, AbstractTableConstraintTypes};
 
 fn main() {
     let namespace = "com.balena_cloud.api".to_string();
@@ -167,10 +178,80 @@ fn main() {
 
     doc.link();
 
-    let j = csdl::generate_csdl_json(&doc).unwrap();
+    let model = AbstractModel {
+        name: "DummyModel".into(),
+        tables: vec![
+            AbstractTable {
+                name: "user".into(),
+                sql_name: "user".into(),
+                fields: vec![
+                    AbstractColumn {
+                        name: "id".into(),
+                        _type: AbstractDataType::UUID {
+                            default: Option::Some(UuidDefaults::V4_RANDOM)
+                        },
+                        not_null: true,
+                        constraints: Option::Some(vec![AbstractTableColumnConstraintTypes::PRIMARY_KEY])
+                    },
+                    AbstractColumn {
+                        name: "name".into(),
+                        _type: AbstractDataType::VARCHAR {
+                            length: 12
+                        },
+                        not_null: false,
+                        constraints: Option::Some(vec![AbstractTableColumnConstraintTypes::UNIQUE_KEY])
+                    },
+                    AbstractColumn {
+                        name: "actor".into(),
+                        _type: AbstractDataType::UUID {
+                            default: Option::None
+                        },
+                        not_null: false,
+                        constraints: Option::None,
+                    }
+                ],
+                constraints: vec![
+                    AbstractTableConstraints {
+                        name: "FK_ACTOR".into(),
+                        _type: AbstractTableConstraintTypes::FOREIGN_KEY {
+                            source_columns: vec!["actor".into()],
+                            reference: "actor".into(),
+                            reference_columns: vec!["id".into()],
+                        }
+                    }
+                ],
+            },
+            AbstractTable {
+                name: "actor".into(),
+                sql_name: "actor".into(),
+                fields: vec![
+                    AbstractColumn {
+                        name: "id".into(),
+                        _type: AbstractDataType::UUID {
+                            default: Option::Some(UuidDefaults::V4_RANDOM)
+                        },
+                        not_null: true,
+                        constraints: Option::Some(vec![AbstractTableColumnConstraintTypes::PRIMARY_KEY])
+                    },
+                    AbstractColumn {
+                        name: "name".into(),
+                        _type: AbstractDataType::VARCHAR {
+                            length: 12
+                        },
+                        not_null: false,
+                        constraints: Option::None,
+                    }
+                ],
+                constraints: vec![],
+            }
+        ]
+    };
+
+    generate_ddl(&model, &crate::db::postgres::engine::PostgresEngine::new());
+    //let j = csdl::generate_csdl_json(&doc).unwrap();
 
     // Print, write to a file, or send to an HTTP server.
-    println!("{}", j);
+    //println!("{}", j);
 
     //let mut p = parser::Parser::new(&doc);
     // // println!("{:?}", parser::odataRelativeUri("ProductsByComplex(complex=@c)?@c={\"@odata.type\":\"doc.Customer\",\"Name\":\"Value\"}\n"));
